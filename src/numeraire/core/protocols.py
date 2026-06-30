@@ -1,0 +1,100 @@
+"""Core contracts (spine). Protocols, not base classes — methods conform by duck typing.
+
+Spine protocols (``DataView``, ``Estimator``, ``Splitter``, ``Evaluator``, result schema)
+are committed. The capability layer (``to_weights`` / ``to_pricing`` / ...) is v0 and is
+expected to crystallize from the first three real adapters (SPEC §2.4), so ``Model`` only
+mandates ``capabilities()`` — concrete extractors are optional and dispatched by capability.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from typing import ClassVar, Protocol, runtime_checkable
+
+import pandas as pd
+
+
+@runtime_checkable
+class DataView(Protocol):
+    """A point-in-time aligned view of the data. A returns panel is one realization."""
+
+    def window(self, end: object) -> DataView:
+        """Return the view restricted to information available up to ``end`` (no look-ahead)."""
+        ...
+
+    @property
+    def calendar(self) -> pd.DatetimeIndex:
+        """Rebalancing / observation timestamps."""
+        ...
+
+
+@runtime_checkable
+class Model(Protocol):
+    """A fitted model. Exposes whatever capabilities it has — capabilities, not mandatory methods.
+
+    Optional, dispatched by capability (do NOT make these mandatory):
+    ``to_weights(view) -> pd.DataFrame``, ``to_pricing(view) -> PricingResult``,
+    ``to_density(view)``, ``to_surface(view)``, ...
+    """
+
+    def capabilities(self) -> set[str]:
+        """The set of capability names this model supports (see ``numeraire.core.capabilities``)."""
+        ...
+
+
+@runtime_checkable
+class SupportsWeights(Protocol):
+    """Capability protocol (v0): a model that emits portfolio/timing weights (``to_weights``).
+
+    Optional and dispatched by capability — a model advertises it via
+    ``capabilities() >= {capabilities.TO_WEIGHTS}``. Kept deliberately thin; the capability
+    layer crystallizes once the third real adapter lands (SPEC §2.4).
+    """
+
+    def to_weights(self, view: DataView) -> pd.DataFrame:
+        """Return ``(date x asset)`` weights for each date in ``view.calendar``."""
+        ...
+
+
+@runtime_checkable
+class SupportsForecast(Protocol):
+    """Capability protocol (v0): a model that emits a next-horizon return forecast.
+
+    The forecast-origin engine fits on a window ending at ``t`` and calls ``forecast`` on that
+    same window; the returned value is the prediction of the return over ``(t, t+h]``, where
+    ``t`` is the window's last date. Advertised via ``capabilities() >= {TO_FORECAST}``.
+    """
+
+    def forecast(self, view: DataView) -> pd.Series:
+        """Per-asset forecast of the return over ``(t, t+h]`` (``t`` is the view's last date)."""
+        ...
+
+
+@runtime_checkable
+class Estimator(Protocol):
+    """scikit-learn-compatible. The method-specific body lives in methods/ or a lab repo."""
+
+    def fit(self, view: DataView) -> Model:
+        """Fit on a (point-in-time) view and return a fitted ``Model``."""
+        ...
+
+
+@runtime_checkable
+class Splitter(Protocol):
+    """Yields (train, test) views — purge/embargo/PIT aware. May wrap sklearn splitters."""
+
+    def split(self, view: DataView) -> Iterator[tuple[DataView, DataView]]:
+        """Yield (train, test) view pairs; the test view is strictly future of train."""
+        ...
+
+
+@runtime_checkable
+class Evaluator(Protocol):
+    """Scores OOS output, emitting rows of the standard tidy result schema."""
+
+    requires: ClassVar[set[str]]
+    """Capabilities an OOS output must expose for this evaluator to run."""
+
+    def evaluate(self, oos_output: object) -> pd.DataFrame:
+        """Return rows in the standard result schema (see ``numeraire.core.schema``)."""
+        ...
