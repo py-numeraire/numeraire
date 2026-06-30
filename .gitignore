@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+.coverage
+coverage.xml
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.import_linter_cache/
+
+# OS
+.DS_Store
+
+# Secrets / credentials
+.env
+.env.*
+*.pem
+*.key
+.pypirc
+secrets/
+
+# Local data & working directories
+data/
+cache/
+runs/

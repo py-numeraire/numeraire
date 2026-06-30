@@ -1,0 +1,22 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: { python-version: "3.12" }
+      - run: uv sync --extra dev --extra all
+      - name: Lint & format
+        run: uv run ruff check . && uv run ruff format --check .
+      - name: Type check (core, strict)
+        run: uv run basedpyright src/numeraire/core
+      - name: Architecture boundary
+        run: uv run lint-imports
+      - name: Tests
+        run: uv run pytest
+      - name: Build
+        run: uv build
