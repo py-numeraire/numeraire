@@ -9,7 +9,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with: { python-version: "3.12" }
-      - run: uv sync --extra dev --extra all
+      # core + methods only; adapter extras (ipca/linearmodels) get their own job once
+      # adapter code + tests exist (ipca's old numba/llvmlite chain needs a py-3.12 fix).
+      - run: uv sync --extra dev
       - name: Lint & format
         run: uv run ruff check . && uv run ruff format --check .
       - name: Type check (core, strict)
