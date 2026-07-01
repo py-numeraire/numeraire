@@ -107,3 +107,40 @@ def test_panel_frame_round_trips_shape() -> None:
     assert list(pf.index.names) == ["date", "asset"]
     # every (date, asset) observation in the ragged panel is present (full view keeps all rows)
     assert len(pf) == len(toy_panel())
+
+
+def test_to_tensor_shapes_and_mask() -> None:
+    v = _view()
+    tsr = v.to_tensor()
+    T, N, K = len(CAL), 4, 3
+    assert tsr.features.shape == (T, N, K)
+    assert tsr.returns.shape == (T, N)
+    assert tsr.mask.shape == (T, N)
+    assert tsr.assets == ["AAA", "BBB", "CCC", "DDD"]
+    # mask marks exactly the present observations; padding stays nan
+    assert int(tsr.mask.sum()) == len(toy_panel())
+    assert np.isnan(tsr.features[~tsr.mask]).all()
+    assert np.isfinite(
+        tsr.features[tsr.mask]
+    ).any()  # present cells carry values (bar the 1 NaN char)
+
+
+def test_to_tensor_matches_features_asof() -> None:
+    v = _view()
+    tsr = v.to_tensor()
+    t_idx = 3  # month 3: all four assets present
+    ids, x = v.features_asof(CAL[t_idx])
+    for a, row in zip(ids, x, strict=True):
+        j = tsr.assets.index(a)
+        assert tsr.mask[t_idx, j]
+        np.testing.assert_array_equal(tsr.features[t_idx, j], row)
+
+
+def test_to_tensor_absent_cells_are_masked_off() -> None:
+    v = _view()
+    tsr = v.to_tensor()
+    j_ddd = tsr.assets.index("DDD")  # DDD arrives at month 3
+    assert not tsr.mask[0, j_ddd]
+    assert np.isnan(tsr.returns[0, j_ddd])
+    j_ccc = tsr.assets.index("CCC")  # CCC delists after month 4
+    assert not tsr.mask[5, j_ccc]

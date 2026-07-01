@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from numeraire.core import capabilities
-from numeraire.core.data import Float, TimeSeriesView
+from numeraire.core.data import CrossSectionView, Float, TimeSeriesView
 from numeraire.core.protocols import Estimator, SupportsForecast, SupportsWeights
 
 
@@ -215,6 +215,113 @@ def walk_forward(
     return WeightsOutput(
         weights=weights,
         realized=realized_df,
+        method=method,
+        config_hash=chash,
+        data_vintage=data_vintage,
+        run_id=rid,
+    )
+
+
+@dataclass(frozen=True)
+class PanelWeightsOutput:
+    """OOS output for a cross-sectional ``to_weights`` method over a ragged panel.
+
+    ``weights`` and ``realized`` are long ``pd.Series`` on a ``(date, asset)`` MultiIndex; the wide,
+    fixed-universe :class:`WeightsOutput` can't represent an entering/exiting universe, so the panel
+    path carries the long form. ``realized`` is each name's ``(t, t+h]`` return, aligned by key.
+    """
+
+    weights: pd.Series
+    realized: pd.Series
+    method: str
+    config_hash: str
+    data_vintage: str
+    run_id: str
+    capability: str = capabilities.TO_WEIGHTS
+    meta: dict[str, Any] = field(default_factory=dict)
+
+    def strategy_returns(self) -> pd.Series:
+        """Cross-sectional portfolio return per date: ``sum_a weights[t, a] * realized[t, a]``."""
+        prod = self.weights * self.realized
+        return prod.groupby(level="date").sum().rename("strategy_return")
+
+
+def _panel_realized(view: CrossSectionView, keys: pd.MultiIndex, horizon: int) -> pd.Series:
+    """Forward return over ``(t, t+h]`` for each ``(date, asset)`` key (``nan`` on delisting)."""
+    dates = keys.get_level_values("date")
+    assets = keys.get_level_values("asset")
+    out = np.full(len(keys), np.nan, dtype=np.float64)
+    for t in pd.DatetimeIndex(dates).unique():
+        ids, y = view.target_asof(t, horizon=horizon)
+        by_asset = dict(zip(ids, y, strict=True))
+        for pos in np.flatnonzero(dates == t):
+            out[int(pos)] = by_asset.get(assets[int(pos)], np.nan)
+    return pd.Series(out, index=keys, name="realized")
+
+
+def _as_weight_series(w: pd.Series | pd.DataFrame) -> pd.Series:
+    """Normalize a panel model's weights to a long ``(date, asset)`` Series."""
+    if isinstance(w, pd.DataFrame):
+        if w.shape[1] != 1:
+            raise TypeError(
+                "panel to_weights must return a long (date, asset) Series or 1-col frame"
+            )
+        return w.iloc[:, 0]
+    return w
+
+
+def walk_forward_panel(
+    estimator: Estimator,
+    view: CrossSectionView,
+    splitter: Any,
+    *,
+    method: str,
+    config: dict[str, Any] | None = None,
+    data_vintage: str = "unknown",
+    run_id: str | None = None,
+) -> PanelWeightsOutput:
+    """Walk-forward OOS backtest of a cross-sectional ``to_weights`` estimator over a ragged panel.
+
+    Mirrors :func:`walk_forward` but for :class:`~numeraire.core.data.CrossSectionView`: the fitted
+    model returns long ``(date, asset)`` weights, realized forward returns are aligned by key (so an
+    entering/exiting universe is handled), and any name whose horizon is unrealized in-view (or that
+    delists first) is dropped before scoring. The time-series engine is left untouched.
+    """
+    chash = config_hash(config)
+    rid = run_id if run_id is not None else f"{method}-{chash}"
+
+    w_parts: list[pd.Series] = []
+    r_parts: list[pd.Series] = []
+    for train, test in splitter.split(view):
+        model = estimator.fit(train)
+        if capabilities.TO_WEIGHTS not in model.capabilities() or not isinstance(
+            model, SupportsWeights
+        ):
+            raise TypeError(f"{method}: fitted model does not support 'to_weights'")
+        w = _as_weight_series(model.to_weights(test))
+        if w.empty:
+            continue
+        keys = w.index
+        if not isinstance(keys, pd.MultiIndex):
+            raise TypeError(f"{method}: panel weights need a (date, asset) MultiIndex")
+        realized = _panel_realized(view, keys, view.horizon)
+        keep = realized.notna().to_numpy()
+        if not bool(keep.any()):
+            continue
+        w_parts.append(w[keep])
+        r_parts.append(realized[keep])
+
+    if w_parts:
+        weights = pd.concat(w_parts).sort_index()
+        realized_s = pd.concat(r_parts).sort_index()
+    else:
+        empty_idx = pd.MultiIndex.from_arrays([pd.DatetimeIndex([]), []], names=["date", "asset"])
+        weights = pd.Series(dtype=np.float64, index=empty_idx, name="weight")
+        realized_s = pd.Series(dtype=np.float64, index=empty_idx, name="realized")
+
+    return PanelWeightsOutput(
+        weights=weights,
+        realized=realized_s,
         method=method,
         config_hash=chash,
         data_vintage=data_vintage,

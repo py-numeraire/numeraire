@@ -162,3 +162,29 @@ def toy_panel(seed: int = 21) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     df.loc[(df["asset"] == "BBB") & (df["date"] == cal[2]), "bm"] = np.nan
     return df
+
+
+def toy_panel_wide(n_months: int = 48, n_assets: int = 10, seed: int = 31) -> pd.DataFrame:
+    """A larger, mildly-ragged stock panel for engine tests (assets enter/exit near the edges).
+
+    Characteristics and returns are independent draws (deterministic) — enough for walk-forward
+    plumbing without asserting profitability.
+    """
+    rng = np.random.default_rng(seed)
+    cal = pd.date_range("1990-01-31", periods=n_months, freq="ME")
+    rows: list[dict[str, object]] = []
+    for j in range(n_assets):
+        start = int(rng.integers(0, 3))  # enters within the first few months
+        end = n_months - int(rng.integers(0, 3))  # some exit near the end
+        for m in range(start, end):
+            rows.append(
+                {
+                    "date": cal[m],
+                    "asset": f"A{j:02d}",
+                    "size": float(rng.normal(0.0, 1.0)),
+                    "bm": float(rng.normal(0.0, 1.0)),
+                    "mom": float(rng.normal(0.0, 1.0)),
+                    "ret": float(rng.normal(0.005, 0.05)),
+                }
+            )
+    return pd.DataFrame(rows)

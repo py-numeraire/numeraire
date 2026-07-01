@@ -35,6 +35,7 @@ by ``(date, asset)`` rather than being shared across assets. It shares the ``Dat
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 import numpy as np
@@ -428,6 +429,25 @@ class TimeSeriesView:
         return pd.DatetimeIndex(kept), np.vstack(rows_x), np.vstack(rows_y)
 
 
+@dataclass(frozen=True)
+class PanelTensor:
+    """A dense ``(T x N x K)`` materialization of a ragged panel — the eject for tensor/NN methods.
+
+    ``features[t, j]`` is asset ``assets[j]``'s characteristic vector at ``dates[t]`` (``nan`` where
+    the asset is absent), ``returns[t, j]`` its period return, and ``mask[t, j]`` whether it is
+    present. Long stays the source of truth (ragged, ecosystem-native); this is derived on demand —
+    dense + a mask is exactly how deep asset-pricing models (Gu-Kelly-Xiu, Chen-Pelger-Zhu) ingest
+    an unbalanced panel. Padding is ``nan`` (not ``0``) so imputation stays the method's choice.
+    """
+
+    dates: pd.DatetimeIndex
+    assets: list[str]
+    chars: list[str]
+    features: Float  # (T, N, K)
+    returns: Float  # (T, N)
+    mask: NDArray[np.bool_]  # (T, N)
+
+
 class CrossSectionView:
     """A cross-sectional (panel) view: many assets with per-asset characteristics, ragged over time.
 
@@ -630,3 +650,20 @@ class CrossSectionView:
         )
         data = np.column_stack([self._x[keep], self._ret[keep]])
         return pd.DataFrame(data, index=idx, columns=[*self._chars, "ret"])
+
+    def to_tensor(self) -> PanelTensor:
+        """Dense ``(T x N x K)`` eject + an ``(T x N)`` presence mask (nan-padded; see PanelTensor).
+
+        ``T`` = this view's dates, ``N`` = the union asset axis (:attr:`assets`), ``K`` = chars.
+        """
+        assets = self.assets
+        col = {a: j for j, a in enumerate(assets)}
+        t_n, n_n, k_n = len(self._dates), len(assets), len(self._chars)
+        features = np.full((t_n, n_n, k_n), np.nan, dtype=np.float64)
+        returns = np.full((t_n, n_n), np.nan, dtype=np.float64)
+        mask = np.zeros((t_n, n_n), dtype=bool)
+        cols = np.array([col[str(a)] for a in self._asset], dtype=np.int64)
+        features[self._dpos, cols] = self._x
+        returns[self._dpos, cols] = self._ret
+        mask[self._dpos, cols] = True
+        return PanelTensor(self._dates, assets, list(self._chars), features, returns, mask)
