@@ -448,6 +448,110 @@ class PanelTensor:
     mask: NDArray[np.bool_]  # (T, N)
 
 
+class _AssetChars:
+    """One asset's characteristic history + the per-asset PIT edge/lag lookups CharBlock uses."""
+
+    def __init__(self, ref: NDArray[np.int64], vint: NDArray[np.int64] | None, vals: Float) -> None:
+        self.ref = ref
+        self.vint = vint
+        self.vals = vals
+
+    def at_lag(self, t_ord: int, lag: int) -> int:
+        """Row of the latest ref-month ``<= t`` pulled back by ``lag`` (lagged mode); -1 if none."""
+        pos = int(np.searchsorted(self.ref, t_ord, side="right")) - 1 - lag
+        return pos if pos >= 0 else -1
+
+    def edge(self, t_ord: int, lag: int) -> int:
+        """Row of the real-time edge at ``t`` (latest ref, latest available vintage); -1 if none."""
+        assert self.vint is not None
+        avail = np.flatnonzero(self.vint + lag <= t_ord)
+        if avail.size == 0:
+            return -1
+        edge_ref = int(self.ref[avail].max())
+        at_edge = avail[self.ref[avail] == edge_ref]
+        return int(at_edge[np.argmax(self.vint[at_edge])])
+
+
+class CharBlock:
+    """A per-asset ``[t, i]`` characteristic source with its own PIT, joined into a panel view.
+
+    The cross-sectional analog of a time-series :class:`FeatureBlock`: several heterogeneous
+    per-stock predictor panels (e.g. two vendors' characteristic sets) coexist, each with its own
+    availability, and concatenate along the characteristic axis. Two modes:
+
+    - **lagged** (default): a tidy ``[date, asset, <chars...>]`` panel; asset ``i``'s value at
+      decision date ``t`` is its row ``lag`` steps back in ``i``'s own series (per-asset lag).
+    - **vintaged** (``vintage_col`` given): a ``[ref_date, asset, vintage, <chars...>]`` panel;
+      asset ``i``'s value at ``t`` is its real-time edge — latest ``ref_date`` whose vintage is
+      available (``vintage`` month ``+ lag <= t``), from that ref's latest vintage (per-asset
+      :class:`VintagedBlock`). This makes per-stock characteristic revisions PIT-safe mechanically.
+
+    Resolved against a view's decision dates at construction (each date uses only info available by
+    it), so downstream needs no special-casing. Align identifiers to a common id before building it.
+    """
+
+    def __init__(
+        self,
+        panel: pd.DataFrame,
+        chars: Sequence[str],
+        *,
+        lag: int = 0,
+        date_col: str = "date",
+        asset_col: str = "asset",
+        vintage_col: str | None = None,
+        ref_col: str = "ref_date",
+    ) -> None:
+        if lag < 0:
+            raise ValueError(f"char-block lag must be >= 0; got {lag}")
+        names = list(chars)
+        self.names: list[str] = [str(c) for c in names]
+        self.lag: int = lag
+        self._vintaged: bool = vintage_col is not None
+        keycol = ref_col if self._vintaged else date_col
+        need = [keycol, asset_col, *names, *([vintage_col] if vintage_col is not None else [])]
+        missing = [c for c in need if c not in panel.columns]
+        if missing:
+            raise ValueError(f"char-block panel is missing column(s) {missing}")
+        df = panel[need].copy()
+        ref = pd.to_datetime(df[keycol])
+        ref_ord = np.asarray(ref.dt.year * 12 + ref.dt.month, dtype=np.int64)
+        assets = df[asset_col].to_numpy().astype(object)
+        vals = _as_2d(df[names])
+        vint_ord = None
+        if vintage_col is not None:
+            vint = pd.to_datetime(df[vintage_col])
+            vint_ord = np.asarray(vint.dt.year * 12 + vint.dt.month, dtype=np.int64)
+        # per-asset month-ordinal + value arrays, so each asset resolves independently
+        self._by_asset: dict[object, _AssetChars] = {}
+        for a in np.unique(assets):
+            m = assets == a
+            if self._vintaged:
+                assert vint_ord is not None
+                self._by_asset[a] = _AssetChars(ref_ord[m], vint_ord[m], vals[m])
+            else:
+                order = np.argsort(ref_ord[m], kind="stable")
+                self._by_asset[a] = _AssetChars(ref_ord[m][order], None, vals[m][order])
+
+    def resolve(
+        self, dates: pd.DatetimeIndex, assets: NDArray[np.object_], dpos: NDArray[np.int64]
+    ) -> Float:
+        """Values known at each row's decision date: ``(len(assets) x K)``, ``nan`` where absent.
+
+        Row ``r`` is asset ``assets[r]`` at decision date ``dates[dpos[r]]``.
+        """
+        cal_ord = np.asarray(dates.year * 12 + dates.month, dtype=np.int64)
+        out = np.full((len(assets), len(self.names)), np.nan, dtype=np.float64)
+        for r in range(len(assets)):
+            entry = self._by_asset.get(assets[r])
+            if entry is None:
+                continue
+            t_ord = int(cal_ord[dpos[r]])
+            i = entry.edge(t_ord, self.lag) if self._vintaged else entry.at_lag(t_ord, self.lag)
+            if i >= 0:
+                out[r] = entry.vals[i]
+        return out
+
+
 class CrossSectionView:
     """A cross-sectional (panel) view: many assets with per-asset characteristics, ragged over time.
 
@@ -480,6 +584,7 @@ class CrossSectionView:
         date_col: str = "date",
         asset_col: str = "asset",
         horizon: int = 1,
+        char_blocks: Sequence[CharBlock] | None = None,
     ) -> None:
         if horizon < 1:
             raise ValueError(
@@ -520,6 +625,13 @@ class CrossSectionView:
         self._cell: dict[tuple[int, object], int] = {
             (int(d), a): i for i, (d, a) in enumerate(zip(self._dpos, self._asset, strict=True))
         }
+        # Heterogeneous per-asset char sources (e.g. two vendors, some vintaged) are resolved to
+        # each row's decision date here (PIT-safe) and concatenated along the char axis — so every
+        # downstream path (features_asof/aligned/window/to_tensor) sees them with no special-casing.
+        for blk in char_blocks or ():
+            resolved = blk.resolve(self._dates, self._asset, self._dpos)
+            self._x = np.ascontiguousarray(np.column_stack([self._x, resolved]))
+            self._chars = self._chars + blk.names
 
     # -- DataView protocol ----------------------------------------------------
 
