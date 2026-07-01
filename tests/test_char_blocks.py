@@ -9,6 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from conftest import toy_panel, toy_vintaged_chars
 from numeraire.core.data import CharBlock, CrossSectionView
 
 DATES = pd.date_range("2000-01-31", periods=4, freq="ME")
@@ -108,3 +109,23 @@ def test_block_chars_survive_windowing() -> None:
     v = CrossSectionView(_panel(), chars=["base"], char_blocks=[blk], horizon=1)
     w = v.window(DATES[2])
     np.testing.assert_allclose(_asof(w, DATES[1], "A", 1), 11.0)  # osap at Feb, unchanged by window
+
+
+def test_vintaged_chars_on_ragged_panel() -> None:
+    # the [t,i] vintage case on the ragged toy panel: per-asset edge, release timing, no leak
+    blk = CharBlock(toy_vintaged_chars(), ["acc"], vintage_col="vintage", lag=0)
+    v = CrossSectionView(toy_panel(), chars=["size", "bm", "mom"], char_blocks=[blk], horizon=1)
+    assert v.char_names == ["size", "bm", "mom", "acc"]
+    cal = pd.date_range("2000-01-31", periods=8, freq="ME")
+
+    def acc(t: object, a: str) -> float:
+        ids, x = v.features_asof(t)
+        return float(x[list(ids).index(a), 3])
+
+    assert np.isnan(acc(cal[0], "AAA"))  # Jan: Jan-ref releases in Feb -> nothing available yet
+    np.testing.assert_allclose(acc(cal[1], "AAA"), 10.0)  # Feb: Jan-ref first release
+    np.testing.assert_allclose(acc(cal[1], "CCC"), 30.0)  # per-asset (differs from AAA)
+    # Mar: Feb-ref is now the newest available (11.0); the Jan revision (10.5) is superseded and
+    # Feb's own revision (11.5, vintage Apr) is not yet visible -> no early-revision leak
+    np.testing.assert_allclose(acc(cal[2], "AAA"), 11.0)
+    assert np.isnan(acc(cal[3], "DDD"))  # DDD absent from the vintaged source -> nan

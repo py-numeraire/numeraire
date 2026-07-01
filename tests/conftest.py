@@ -164,6 +164,39 @@ def toy_panel(seed: int = 21) -> pd.DataFrame:
     return df
 
 
+def toy_vintaged_chars() -> pd.DataFrame:
+    """A vintaged per-stock characteristic panel ``[ref_date, asset, vintage, acc]`` for toy_panel.
+
+    The ``[t,i]`` analog of :func:`toy_vintaged_table`: each ``(asset, ref)`` is first released at
+    ``ref+1`` and revised at ``ref+2``, across several assets — exercises ``CharBlock``'s per-asset
+    vintage edge on the ragged toy panel. Values are ``asset-offset + month index`` (revision +0.5),
+    deterministic. Covers AAA/BBB/CCC (not DDD), so DDD also tests the missing-asset path.
+    """
+    refs = pd.date_range("2000-01-31", periods=5, freq="ME")
+    base = {"AAA": 10.0, "BBB": 20.0, "CCC": 30.0}
+    rows: list[dict[str, object]] = []
+    for asset, b in base.items():
+        for i, ref in enumerate(refs):
+            first = b + i
+            rows.append(
+                {
+                    "ref_date": ref,
+                    "asset": asset,
+                    "vintage": ref + pd.offsets.MonthEnd(1),
+                    "acc": first,
+                }
+            )
+            rows.append(
+                {
+                    "ref_date": ref,
+                    "asset": asset,
+                    "vintage": ref + pd.offsets.MonthEnd(2),
+                    "acc": first + 0.5,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def toy_panel_wide(n_months: int = 48, n_assets: int = 10, seed: int = 31) -> pd.DataFrame:
     """A larger, mildly-ragged stock panel for engine tests (assets enter/exit near the edges).
 
