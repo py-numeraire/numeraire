@@ -27,11 +27,29 @@ block sharing the returns calendar — identical to the original single-block be
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Protocol, runtime_checkable
+
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
 Float = NDArray[np.float64]
+
+
+@runtime_checkable
+class Block(Protocol):
+    """A tagged feature block the view aligns to the decision calendar and concatenates.
+
+    Both :class:`FeatureBlock` (time-series + lag) and :class:`VintagedBlock` (a ``(ref, vintage)``
+    panel) satisfy it, so heterogeneous macro sources coexist in one :class:`TimeSeriesView`.
+    """
+
+    @property
+    def names(self) -> list[str]: ...
+    def is_ready(self, t: object) -> bool: ...
+    def asof(self, t: object) -> Float: ...
+    def truncate(self, end: object) -> Block: ...
 
 
 def _as_2d(frame: pd.DataFrame) -> Float:
@@ -119,6 +137,89 @@ class FeatureBlock:
         return blk
 
 
+class VintagedBlock:
+    """A vintaged (point-in-time) block: a ``(ref_date x vintage)`` panel resolved by ``asof``.
+
+    Built from a tidy table ``[ref_date, vintage, <series...>]`` (e.g. what a FRED-MD build yields).
+    ``asof(t)`` returns the real-time edge: among vintages available at ``t`` (``vintage`` month +
+    ``lag`` <= ``t``'s month), the most recent ``ref_date``'s value taken from its latest available
+    vintage. Revisions are respected — an earlier vintage's number is used until a later one is
+    available, so no future revision leaks in (landmine #1).
+
+    ``lag`` (whole months, default 1) is the availability buffer. The ``vintage`` label already *is*
+    the release month, so one month suffices; sweep it up for a more conservative real-time cut.
+    """
+
+    def __init__(
+        self,
+        table: pd.DataFrame,
+        *,
+        series: list[str] | None = None,
+        lag: int = 1,
+        name: str | None = None,
+        ref_col: str = "ref_date",
+        vintage_col: str = "vintage",
+    ) -> None:
+        if lag < 0:
+            raise ValueError(f"vintaged-block lag must be >= 0; got {lag}")
+        cols = (
+            [c for c in table.columns if c not in (ref_col, vintage_col)]
+            if series is None
+            else list(series)
+        )
+        ref = pd.to_datetime(table[ref_col])
+        vint = pd.to_datetime(table[vintage_col])
+        self._names: list[str] = [str(c) for c in cols]
+        # month ordinals (year*12 + month) → cheap availability / edge comparisons
+        self._ref: NDArray[np.int64] = np.asarray(ref.dt.year * 12 + ref.dt.month, dtype=np.int64)
+        self._vint: NDArray[np.int64] = np.asarray(
+            vint.dt.year * 12 + vint.dt.month, dtype=np.int64
+        )
+        self._vals: Float = _as_2d(table[cols])
+        self.lag: int = lag
+        self.name: str | None = name
+
+    @property
+    def names(self) -> list[str]:
+        """Feature (series) names of this block."""
+        return list(self._names)
+
+    def _edge(self, t: object) -> int:
+        """Row index of the real-time edge at ``t`` (latest ref_date, latest available vintage)."""
+        ts = pd.Timestamp(t)  # pyright: ignore[reportArgumentType]
+        t_ord = ts.year * 12 + ts.month
+        avail = np.flatnonzero(self._vint + self.lag <= t_ord)
+        if avail.size == 0:
+            return -1
+        edge_ref = int(self._ref[avail].max())
+        at_edge = avail[self._ref[avail] == edge_ref]
+        return int(at_edge[np.argmax(self._vint[at_edge])])
+
+    def is_ready(self, t: object) -> bool:
+        """Whether any vintage is available at ``t`` (False before the first release + lag)."""
+        return self._edge(t) >= 0
+
+    def asof(self, t: object) -> Float:
+        """Real-time vector at ``t``: latest ref_date's value from its latest available vintage."""
+        i = self._edge(t)
+        if i < 0:
+            raise KeyError(f"no vintage available as of {t} for block {self.name!r}")
+        return self._vals[i]
+
+    def truncate(self, end: object) -> VintagedBlock:
+        """A copy holding only vintages released by ``end`` (``vintage`` month <= ``end`` month)."""
+        ts = pd.Timestamp(end)  # pyright: ignore[reportArgumentType]
+        keep = self._vint <= ts.year * 12 + ts.month
+        blk = object.__new__(VintagedBlock)
+        blk._names = self._names
+        blk._ref = self._ref[keep]
+        blk._vint = self._vint[keep]
+        blk._vals = self._vals[keep]
+        blk.lag = self.lag
+        blk.name = self.name
+        return blk
+
+
 class TimeSeriesView:
     """A point-in-time view: a returns (decision) calendar + one or more aligned feature blocks.
 
@@ -154,7 +255,7 @@ class TimeSeriesView:
         returns: pd.DataFrame,
         features: pd.DataFrame | None = None,
         *,
-        blocks: list[FeatureBlock] | None = None,
+        blocks: Sequence[Block] | None = None,
         horizon: int = 1,
         risk_free: pd.Series | None = None,
         excess: str = "simple",
@@ -182,7 +283,7 @@ class TimeSeriesView:
         self._dates: pd.DatetimeIndex = index
         self._assets: list[str] = [str(c) for c in returns.columns]
         self._ret: Float = _as_2d(returns)
-        self._blocks: list[FeatureBlock] = blocks
+        self._blocks: list[Block] = list(blocks)
         self.horizon: int = horizon
         # Calendar = the subset of dates at which predictions/rebalances happen. Defaults to
         # the full returns index; `window`/`between` carve out train/test sub-calendars.
