@@ -89,6 +89,21 @@ def test_market_timing_excess_end_to_end() -> None:
     np.testing.assert_allclose(view.returns_frame()["mkt"].to_numpy(), (raw["mkt"] - rf).to_numpy())
 
 
+def test_walk_forward_multi_asset_end_to_end() -> None:
+    # a fixed 3-asset universe with shared predictors (the MV / portfolio shape): to_weights emits
+    # a 3-column weight each period and the engine sums w*r across the 3 assets
+    view = TimeSeriesView(toy_assets(), toy_predictors(), horizon=1)
+    out = walk_forward(
+        _OLSTimingEstimator(), view, WalkForwardSplitter(min_train=30, test_size=6), method="multi"
+    )
+    assert list(out.weights.columns) == ["size", "value", "mom"]
+    assert out.weights.shape[1] == 3
+    assert out.weights.index.equals(out.realized.index)
+    assert not out.realized.isna().to_numpy().any()
+    manual = (out.weights.to_numpy() * out.realized.to_numpy()).sum(axis=1)
+    np.testing.assert_allclose(out.strategy_returns().to_numpy(), manual)
+
+
 def test_excess_log_vs_simple_differ() -> None:
     raw, rf = toy_market()
     preds = toy_predictors()
