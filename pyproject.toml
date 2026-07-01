@@ -36,7 +36,7 @@ dev = [
 ]
 docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.25"]
 
-# Methods bundled in the repo register themselves via entry points (open registry, §2.5).
+# Methods bundled in the repo register themselves via entry points (open registry).
 # External packages (numeraire-yourlab, numeraire-<method>) register the same way.
 [project.entry-points."numeraire.methods"]
 # (none yet — methods land here as they are wired in)
@@ -69,7 +69,7 @@ addopts = "--cov=numeraire --cov-report=term-missing"
 [tool.coverage.run]
 source = ["src/numeraire/core"]
 
-# --- the architecture boundary, as a lint rule (§2.1) ---
+# --- the architecture boundary, as a lint rule ---
 [tool.importlinter]
 root_package = "numeraire"
 include_external_packages = true

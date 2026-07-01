@@ -7,7 +7,7 @@ Dependency arrows point *toward* core; core never imports ``numeraire.methods``,
 
 from __future__ import annotations
 
-# Importing evaluators registers the bundled native evaluators (open registry, §2.5).
+# Importing evaluators registers the bundled native evaluators (open registry).
 from numeraire.core import evaluators as evaluators
 
 __all__ = ["evaluators"]

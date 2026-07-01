@@ -1,4 +1,4 @@
-"""Multi-block PIT features: heterogeneous macro sources with per-block availability lag (§4A).
+"""Multi-block PIT features: heterogeneous macro sources with per-block availability lag.
 
 Covers the motivating case — combining sources with different publication lags and different
 calendars as predictors: FRED (lag=1) + another vintage-like source (lag=2) + a no-vintage

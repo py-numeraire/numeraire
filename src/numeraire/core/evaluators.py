@@ -157,7 +157,7 @@ class SquaredErrorDiffEvaluator:
         return _frame(rows)
 
 
-# Bundled native evaluators register on import (open registry, §2.5).
+# Bundled native evaluators register on import (open registry).
 register_evaluator("sharpe", SharpeEvaluator(), overwrite=True)
 register_evaluator("mean_return", MeanReturnEvaluator(), overwrite=True)
 register_evaluator("strategy_return", StrategyReturnEvaluator(), overwrite=True)
