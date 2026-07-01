@@ -489,6 +489,10 @@ class CrossSectionView:
         frame = panel[[date_col, asset_col, *names, ret]].copy()
         frame[date_col] = pd.to_datetime(frame[date_col])
         frame = frame.sort_values([date_col, asset_col], kind="stable").reset_index(drop=True)
+        if bool(frame.duplicated([date_col, asset_col]).any()):
+            raise ValueError(
+                "panel has duplicate (date, asset) rows; each observation must be unique"
+            )
         cal = pd.DatetimeIndex(frame[date_col].drop_duplicates())
         self._dates: pd.DatetimeIndex = cal
         self._chars: list[str] = [str(c) for c in names]
