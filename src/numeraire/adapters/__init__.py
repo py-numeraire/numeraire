@@ -1,5 +1,6 @@
 """numeraire.adapters — thin wrappers making reference libraries conform to core protocols.
 
-Optional extras (``[ipca]``, ``[linearmodels]``). Glue, not spine. Each adapter
-imports its reference library only at module top level, so installing core alone never requires it.
+Glue, not spine — each adapter imports its reference library only at module top level, so installing
+core alone never requires it. Reference-library methods (e.g. IPCA via ``ipca``) ship in extension
+packages such as ``numeraire-zoo``, which declare those heavy dependencies themselves.
 """

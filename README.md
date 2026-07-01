@@ -20,7 +20,7 @@ architecture (see `pyproject.toml [tool.importlinter]`).
 src/numeraire/
   core/        # spine: DataView/Estimator/Splitter/Evaluator protocols, capabilities,
                # result schema, evaluator registry  (stable, strict-typed, high-coverage)
-  adapters/    # optional extras: thin wrappers (ipca, linearmodels) — glue, not spine
+  adapters/    # thin wrappers making reference libraries conform to core — glue, not spine
   methods/     # published methods bundled as extensions (VoC, 1/A, classical tests, …)
 ```
 
@@ -31,7 +31,6 @@ Methods register via the `numeraire.methods` entry-point group, so external pack
 
 ```bash
 uv sync --extra dev            # dev environment
-uv sync --extra all            # + ipca / linearmodels adapters
 ```
 
 Base install is the spine + native general evaluators only; method/adapter deps are extras.
