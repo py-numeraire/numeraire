@@ -23,6 +23,13 @@ sources — different lags, different calendars — coexist as macro inputs. Blo
 
 Backward compatibility: ``TimeSeriesView(returns, features=df)`` wraps ``df`` as a single ``lag=0``
 block sharing the returns calendar — identical to the original single-block behaviour.
+
+Cross-section. :class:`CrossSectionView` is the sibling for the *cross-sectional* family
+(Fama-MacBeth / IPCA / characteristic sorts): a ragged panel of many assets whose predictors vary
+by ``(date, asset)`` rather than being shared across assets. It shares the ``DataView`` protocol
+(``window`` + ``calendar``) but exposes a cross-section-shaped ``features_asof`` / ``target_asof`` /
+``aligned`` — see its own docstring. The naming follows the field's own dichotomy (Fama 2015,
+"Cross-Section *Versus* Time-Series Tests"): time-series tests (GRS) vs cross-sectional tests (FM).
 """
 
 from __future__ import annotations
@@ -419,3 +426,207 @@ class TimeSeriesView:
             y = np.empty((0, len(self._assets)), dtype=np.float64)
             return pd.DatetimeIndex([]), x, y
         return pd.DatetimeIndex(kept), np.vstack(rows_x), np.vstack(rows_y)
+
+
+class CrossSectionView:
+    """A cross-sectional (panel) view: many assets with per-asset characteristics, ragged over time.
+
+    The sibling of :class:`TimeSeriesView` for the *cross-sectional* asset-pricing family
+    (Fama-MacBeth, IPCA, characteristic sorts), where the predictor ``z_{i,t}`` varies by both date
+    **and** asset — unlike the aggregate/shared predictors of a time-series view. Built from a tidy
+    long panel ``[date, asset, <chars...>, ret]``; the universe may enter/exit (ragged).
+
+    Shapes (the reason this is a sibling, not a retrofit):
+
+    - ``features_asof(t)`` returns the whole cross-section at ``t`` — ``(ids, X)`` with ``X`` shaped
+      ``(n_alive x K)`` — rather than one shared vector.
+    - ``target_asof(t, h)`` returns each alive asset's return realized over ``(t, t+h]`` (``nan`` if
+      the asset delists before the horizon closes).
+    - ``aligned`` stacks every ``(date, asset)`` observation into a panel design matrix
+      ``(N_obs x K)`` with a ``(N_obs,)`` target — the shape Fama-MacBeth / IPCA consume.
+
+    Internally stored as a tidy panel sorted by ``(date, asset)`` (date-outer, so a cross-section
+    is a contiguous slice). Characteristics are taken as **known at their row date** (period-end
+    info set at ``t``); any reporting/publication lag must be applied to the panel before it is
+    handed in (PIT is the provider's contract, mirroring a time-series block's ``lag=0``).
+    """
+
+    def __init__(
+        self,
+        panel: pd.DataFrame,
+        *,
+        chars: Sequence[str],
+        ret: str = "ret",
+        date_col: str = "date",
+        asset_col: str = "asset",
+        horizon: int = 1,
+    ) -> None:
+        if horizon < 1:
+            raise ValueError(
+                f"horizon must be >= 1 (h=0 is a contemporaneous look-ahead); got {horizon}"
+            )
+        names = list(chars)
+        frame = panel[[date_col, asset_col, *names, ret]].copy()
+        frame[date_col] = pd.to_datetime(frame[date_col])
+        frame = frame.sort_values([date_col, asset_col], kind="stable").reset_index(drop=True)
+        cal = pd.DatetimeIndex(frame[date_col].drop_duplicates())
+        self._dates: pd.DatetimeIndex = cal
+        self._chars: list[str] = [str(c) for c in names]
+        self._asset: NDArray[np.object_] = frame[asset_col].to_numpy().astype(object)
+        self._x: Float = _as_2d(frame[names])
+        self._ret: Float = frame[ret].to_numpy(dtype=np.float64)
+        self._dpos: NDArray[np.int64] = np.asarray(
+            cal.searchsorted(frame[date_col].to_numpy()), dtype=np.int64
+        )
+        self.horizon: int = horizon
+        self._cal: pd.DatetimeIndex = cal
+        # (date-position, asset) -> row index; powers ragged forward-return lookups over delistings
+        self._cell: dict[tuple[int, object], int] = {
+            (int(d), a): i for i, (d, a) in enumerate(zip(self._dpos, self._asset, strict=True))
+        }
+
+    # -- DataView protocol ----------------------------------------------------
+
+    @property
+    def calendar(self) -> pd.DatetimeIndex:
+        """Rebalancing / observation timestamps (the prediction calendar)."""
+        return self._cal
+
+    @property
+    def assets(self) -> list[str]:
+        """Sorted union of every asset id that ever appears (the report / tensor column axis)."""
+        return sorted({str(a) for a in self._asset})
+
+    @property
+    def char_names(self) -> list[str]:
+        """Characteristic (per-asset predictor) column names."""
+        return list(self._chars)
+
+    # -- cross-section access -------------------------------------------------
+
+    def _pos_asof(self, t: object) -> int:
+        """Position of the latest calendar date ``<= t`` (the cross-section observed at ``t``)."""
+        ts = pd.Timestamp(t)  # pyright: ignore[reportArgumentType]
+        return int(self._dates.searchsorted(ts, side="right")) - 1
+
+    def _row_slice(self, p: int) -> tuple[int, int]:
+        """Half-open row range of the (contiguous) cross-section at date-position ``p``."""
+        lo = int(np.searchsorted(self._dpos, p, side="left"))
+        hi = int(np.searchsorted(self._dpos, p, side="right"))
+        return lo, hi
+
+    def universe(self, t: object) -> list[str]:
+        """Asset ids alive as of ``t`` (empty before the first date)."""
+        p = self._pos_asof(t)
+        if p < 0:
+            return []
+        lo, hi = self._row_slice(p)
+        return [str(a) for a in self._asset[lo:hi]]
+
+    def features_asof(self, t: object) -> tuple[NDArray[np.object_], Float]:
+        """The cross-section known as of ``t``: ``(ids, X)`` with ``X`` shaped ``(n_alive x K)``."""
+        p = self._pos_asof(t)
+        if p < 0:
+            raise KeyError(f"no cross-section available as of {t}")
+        lo, hi = self._row_slice(p)
+        return self._asset[lo:hi], self._x[lo:hi]
+
+    def target_asof(
+        self, t: object, horizon: int | None = None
+    ) -> tuple[NDArray[np.object_], Float]:
+        """Per-asset return over ``(t, t+h]`` for the ``t`` cross-section; ``nan`` if it delists."""
+        h = self.horizon if horizon is None else horizon
+        p = self._pos_asof(t)
+        if p < 0:
+            return np.empty(0, dtype=object), np.empty(0, dtype=np.float64)
+        lo, hi = self._row_slice(p)
+        ids = self._asset[lo:hi]
+        out = np.full(len(ids), np.nan, dtype=np.float64)
+        if p + h < len(self._dates):
+            for k in range(len(ids)):
+                a = ids[k]
+                prod = 1.0
+                ok = True
+                for step in range(1, h + 1):
+                    r = self._cell.get((p + step, a))
+                    if r is None:  # asset absent at t+step (delisted / gap) -> no clean h-return
+                        ok = False
+                        break
+                    prod *= 1.0 + self._ret[r]
+                if ok:
+                    out[k] = prod - 1.0
+        return ids, out
+
+    # -- PIT windowing --------------------------------------------------------
+
+    def _spawn(self, *, end: object, cal: pd.DatetimeIndex) -> CrossSectionView:
+        """Sub-view with info ``<= end``: rows truncated, calendar set to ``cal``."""
+        ts = pd.Timestamp(end)  # pyright: ignore[reportArgumentType]
+        hi = int(self._dates.searchsorted(ts, side="right"))
+        mask = self._dpos < hi
+        v = object.__new__(CrossSectionView)
+        v._dates = self._dates[:hi]
+        v._chars = self._chars
+        v._asset = self._asset[mask]
+        v._x = self._x[mask]
+        v._ret = self._ret[mask]
+        v._dpos = self._dpos[mask]
+        v.horizon = self.horizon
+        v._cal = cal
+        v._cell = {(int(d), a): i for i, (d, a) in enumerate(zip(v._dpos, v._asset, strict=True))}
+        return v
+
+    def window(self, end: object) -> CrossSectionView:
+        """View restricted to info available up to ``end`` (data and calendar both ``<= end``)."""
+        ts = pd.Timestamp(end)  # pyright: ignore[reportArgumentType]
+        hi = int(self._dates.searchsorted(ts, side="right"))
+        return self._spawn(end=ts, cal=self._dates[:hi])
+
+    def between(self, start: object, end: object) -> CrossSectionView:
+        """Test-fold view: data truncated to ``<= end``, calendar restricted to ``(start, end]``."""
+        lo = pd.Timestamp(start)  # pyright: ignore[reportArgumentType]
+        hi = pd.Timestamp(end)  # pyright: ignore[reportArgumentType]
+        data_hi = int(self._dates.searchsorted(hi, side="right"))
+        dates = self._dates[:data_hi]
+        return self._spawn(end=hi, cal=dates[dates > lo])
+
+    # -- supervised design + ejects -------------------------------------------
+
+    def aligned(self, horizon: int | None = None) -> tuple[pd.MultiIndex, Float, Float]:
+        """Panel design over the calendar: stacked ``keys[(date,asset)], X (Nobs x K), y (Nobs,)``.
+
+        Keeps only observations whose target is realized in-view (horizon purge / no delisting gap)
+        and whose characteristics are all finite (missing-char imputation is the method's job).
+        """
+        h = self.horizon if horizon is None else horizon
+        d_keys: list[pd.Timestamp] = []
+        a_keys: list[object] = []
+        rows_x: list[Float] = []
+        ys: list[float] = []
+        for t in self._cal:
+            ids, x = self.features_asof(t)
+            _ids, y = self.target_asof(t, h)
+            for k in range(len(ids)):
+                if not np.isfinite(y[k]) or not bool(np.isfinite(x[k]).all()):
+                    continue
+                d_keys.append(t)
+                a_keys.append(ids[k])
+                rows_x.append(x[k])
+                ys.append(float(y[k]))
+        if not ys:
+            empty = pd.MultiIndex.from_arrays([pd.DatetimeIndex([]), []], names=["date", "asset"])
+            return empty, np.empty((0, len(self._chars)), dtype=np.float64), np.empty(0, np.float64)
+        keys = pd.MultiIndex.from_arrays(
+            [pd.DatetimeIndex(d_keys), a_keys], names=["date", "asset"]
+        )
+        return keys, np.vstack(rows_x), np.asarray(ys, dtype=np.float64)
+
+    def panel_frame(self) -> pd.DataFrame:
+        """Tidy long eject: ``[<chars>, ret]`` on a ``(date,asset)`` MultiIndex over calendar."""
+        cal_pos = {int(x) for x in self._dates.searchsorted(self._cal)}
+        keep = [i for i, d in enumerate(self._dpos) if int(d) in cal_pos]
+        idx = pd.MultiIndex.from_arrays(
+            [self._dates[self._dpos[keep]], self._asset[keep]], names=["date", "asset"]
+        )
+        data = np.column_stack([self._x[keep], self._ret[keep]])
+        return pd.DataFrame(data, index=idx, columns=[*self._chars, "ret"])

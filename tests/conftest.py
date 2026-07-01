@@ -127,3 +127,38 @@ def toy_vintaged_table(n_refs: int = 24, seed: int = 15) -> pd.DataFrame:
 def toy_vintaged_block(lag: int = 1, name: str = "fred") -> VintagedBlock:
     """The vintaged panel wrapped as a :class:`VintagedBlock` (asof by ``vintage + lag``)."""
     return VintagedBlock(toy_vintaged_table(), lag=lag, name=name)
+
+
+# presence windows (global-month indices) → a ragged universe with entry, exit, and a late arrival
+TOY_PANEL_PRESENCE: dict[str, range] = {
+    "AAA": range(0, 8),  # full history
+    "BBB": range(2, 8),  # enters at month 2
+    "CCC": range(0, 5),  # delists after month 4
+    "DDD": range(3, 8),  # late arrival
+}
+
+
+def toy_panel(seed: int = 21) -> pd.DataFrame:
+    """A tidy, **ragged** individual-stock panel ``[date, asset, size, bm, mom, ret]`` (8 months).
+
+    Universe enters/exits (see ``TOY_PANEL_PRESENCE``) and one characteristic cell is missing
+    (``BBB`` @ month 2 has ``NaN`` ``bm``) to exercise delisting targets + missing-char handling.
+    """
+    rng = np.random.default_rng(seed)
+    cal = pd.date_range("2000-01-31", periods=8, freq="ME")
+    rows: list[dict[str, object]] = []
+    for asset, months in TOY_PANEL_PRESENCE.items():
+        for m in months:
+            rows.append(
+                {
+                    "date": cal[m],
+                    "asset": asset,
+                    "size": round(float(rng.normal(5.0, 1.0)), 3),
+                    "bm": round(float(rng.normal(0.5, 0.2)), 3),
+                    "mom": round(float(rng.normal(0.0, 0.1)), 3),
+                    "ret": round(float(rng.normal(0.01, 0.05)), 4),
+                }
+            )
+    df = pd.DataFrame(rows)
+    df.loc[(df["asset"] == "BBB") & (df["date"] == cal[2]), "bm"] = np.nan
+    return df
