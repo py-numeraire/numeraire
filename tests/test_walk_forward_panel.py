@@ -12,7 +12,7 @@ import pandas as pd
 
 from conftest import toy_panel_wide
 from numeraire.core import capabilities
-from numeraire.core.data import CrossSectionView
+from numeraire.core.data import CharBlock, CrossSectionView
 from numeraire.core.engine import PanelWeightsOutput, walk_forward_panel
 from numeraire.core.splitter import WalkForwardSplitter
 
@@ -100,3 +100,19 @@ def test_panel_backtest_is_deterministic() -> None:
     a = walk_forward_panel(_XSEstimator(), v, sp, method="toy_fm").strategy_returns()
     b = walk_forward_panel(_XSEstimator(), v, sp, method="toy_fm").strategy_returns()
     np.testing.assert_array_equal(a.to_numpy(), b.to_numpy())
+
+
+def test_walk_forward_panel_with_char_block_end_to_end() -> None:
+    # a char_block (lagged per-asset) through the panel engine: it resolves into the design matrix,
+    # its lag warm-up rows drop in aligned(), and the fit sees the concatenated characteristic
+    pan = toy_panel_wide()
+    extra = pan[["date", "asset", "size"]].rename(columns={"size": "lagsize"})
+    v = CrossSectionView(
+        pan, chars=["size", "bm", "mom"], char_blocks=[CharBlock(extra, ["lagsize"], lag=1)]
+    )
+    out = walk_forward_panel(
+        _XSEstimator(), v, WalkForwardSplitter(min_train=24, test_size=6), method="toy_fm_cb"
+    )
+    assert isinstance(out, PanelWeightsOutput)
+    assert not out.weights.empty
+    assert not out.realized.isna().to_numpy().any()

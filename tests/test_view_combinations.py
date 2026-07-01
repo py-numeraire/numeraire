@@ -18,9 +18,10 @@ from conftest import (
     toy_market,
     toy_predictors,
     toy_vintaged_block,
+    toy_vintaged_table,
 )
 from numeraire.core import capabilities
-from numeraire.core.data import FeatureBlock, TimeSeriesView
+from numeraire.core.data import FeatureBlock, TimeSeriesView, VintagedBlock
 from numeraire.core.engine import WeightsOutput, walk_forward
 from numeraire.core.splitter import WalkForwardSplitter
 
@@ -165,3 +166,26 @@ def test_toy_catalog_is_deterministic() -> None:
     a, _ = toy_market()
     b, _ = toy_market()
     np.testing.assert_array_equal(a.to_numpy(), b.to_numpy())
+
+
+def test_walk_forward_with_vintaged_block_end_to_end() -> None:
+    # a multi-block TS view (lag-0 predictors + vintaged FRED) through the real engine: the vintage
+    # warm-up is purged via is_ready inside aligned(), and the fit sees the concatenated features
+    mkt, rf = toy_market()
+    view = TimeSeriesView(
+        mkt,
+        risk_free=rf,
+        blocks=[
+            FeatureBlock(toy_predictors(), lag=0, name="pred"),
+            VintagedBlock(toy_vintaged_table(n_refs=72), lag=1, name="fred"),
+        ],
+    )
+    out = walk_forward(
+        _OLSTimingEstimator(),
+        view,
+        WalkForwardSplitter(min_train=30, test_size=6),
+        method="voc_fred",
+    )
+    assert isinstance(out, WeightsOutput)
+    assert not out.weights.empty
+    assert not out.realized.isna().to_numpy().any()  # warm-up + unrealized purged end-to-end
