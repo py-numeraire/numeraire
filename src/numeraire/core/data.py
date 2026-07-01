@@ -374,7 +374,7 @@ class TimeSeriesView:
         return pd.DataFrame(self._ret[pos], index=self._cal, columns=self._assets)
 
     def features_frame(self) -> pd.DataFrame:
-        """The ``(date x feature)`` features block over the calendar (lag-aware; raw eject, §4A)."""
+        """The ``(date x feature)`` features block over the calendar (lag-aware; raw eject)."""
         if not len(self._cal):
             return pd.DataFrame(np.empty((0, len(self.feature_names))), columns=self.feature_names)
         rows = np.vstack([self._features_vec(t) for t in self._cal])
