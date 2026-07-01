@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from conftest import toy_panel
-from numeraire.core.data import CrossSectionView
+from numeraire.core.data import CrossSectionView, TimeSeriesView
 from numeraire.core.protocols import DataView
 
 CAL = pd.date_range("2000-01-31", periods=8, freq="ME")
@@ -144,3 +144,22 @@ def test_to_tensor_absent_cells_are_masked_off() -> None:
     assert np.isnan(tsr.returns[0, j_ddd])
     j_ccc = tsr.assets.index("CCC")  # CCC delists after month 4
     assert not tsr.mask[5, j_ccc]
+
+
+def test_single_asset_panel_matches_timeseries() -> None:
+    # N=1 degeneracy: a 1-asset panel's supervised design equals a 1-asset TimeSeriesView's
+    # (the shared-vs-per-asset feature distinction vanishes with one asset).
+    idx = pd.date_range("2000-01-31", periods=6, freq="ME")
+    x = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    r = np.array([0.01, -0.02, 0.03, 0.00, 0.04, -0.01])
+    cs = CrossSectionView(
+        pd.DataFrame({"date": idx, "asset": "A", "x": x, "ret": r}), chars=["x"], horizon=1
+    )
+    ts = TimeSeriesView(
+        pd.DataFrame({"A": r}, index=idx), pd.DataFrame({"x": x}, index=idx), horizon=1
+    )
+    ck, cx, cy = cs.aligned()
+    td, tx, ty = ts.aligned()
+    np.testing.assert_array_equal(ck.get_level_values("date").to_numpy(), td.to_numpy())
+    np.testing.assert_allclose(cx, tx)
+    np.testing.assert_allclose(cy, ty.ravel())

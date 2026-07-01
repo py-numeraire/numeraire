@@ -486,6 +486,13 @@ class CrossSectionView:
                 f"horizon must be >= 1 (h=0 is a contemporaneous look-ahead); got {horizon}"
             )
         names = list(chars)
+        required = [date_col, asset_col, ret, *names]
+        missing = [c for c in required if c not in panel.columns]
+        if missing:
+            raise ValueError(
+                f"panel is missing required column(s) {missing}; "
+                f"needs date_col={date_col!r}, asset_col={asset_col!r}, ret={ret!r}, chars={names}"
+            )
         frame = panel[[date_col, asset_col, *names, ret]].copy()
         frame[date_col] = pd.to_datetime(frame[date_col])
         frame = frame.sort_values([date_col, asset_col], kind="stable").reset_index(drop=True)
@@ -494,6 +501,11 @@ class CrossSectionView:
                 "panel has duplicate (date, asset) rows; each observation must be unique"
             )
         cal = pd.DatetimeIndex(frame[date_col].drop_duplicates())
+        if len(cal) <= horizon:
+            raise ValueError(
+                f"panel has {len(cal)} date(s) but horizon={horizon} needs at least {horizon + 1} "
+                "to form any forward return; no usable (t, t+h] window exists"
+            )
         self._dates: pd.DatetimeIndex = cal
         self._chars: list[str] = [str(c) for c in names]
         self._asset: NDArray[np.object_] = frame[asset_col].to_numpy().astype(object)

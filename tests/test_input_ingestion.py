@@ -193,3 +193,27 @@ def test_panel_parses_string_dates() -> None:
     v = CrossSectionView(tbl, chars=["size"])
     assert isinstance(v.calendar, pd.DatetimeIndex)
     assert len(v.calendar) == 2
+
+
+def test_panel_missing_ret_is_clear_error() -> None:
+    with pytest.raises(ValueError, match="missing required column"):
+        CrossSectionView(_panel().drop(columns="ret"), chars=["size"])
+
+
+def test_panel_missing_char_is_clear_error() -> None:
+    with pytest.raises(ValueError, match="missing required column"):
+        CrossSectionView(_panel(), chars=["size", "not_a_column"])
+
+
+def test_panel_no_forward_window_rejected() -> None:
+    # a single cross-section (one date) can form no (t, t+h] target -> clear error, not silent empty
+    one_date = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2000-01-31", "2000-01-31"]),
+            "asset": ["AAA", "BBB"],
+            "size": [1.0, 2.0],
+            "ret": [0.01, 0.02],
+        }
+    )
+    with pytest.raises(ValueError, match="no usable"):
+        CrossSectionView(one_date, chars=["size"], horizon=1)
