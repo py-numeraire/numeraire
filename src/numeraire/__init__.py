@@ -6,13 +6,15 @@ never the reverse (enforced by import-linter, see pyproject ``[tool.importlinter
 """
 
 from numeraire.core import capabilities
-from numeraire.core.data import TimeSeriesView
+from numeraire.core.data import CrossSectionView, TimeSeriesView
 from numeraire.core.engine import (
     ForecastOutput,
+    PanelWeightsOutput,
     WeightsOutput,
     config_hash,
     walk_forward,
     walk_forward_forecast,
+    walk_forward_panel,
 )
 from numeraire.core.evaluators import (
     MeanReturnEvaluator,
@@ -40,6 +42,7 @@ from numeraire.core.splitter import WalkForwardSplitter
 
 __all__ = [
     "RESULT_COLUMNS",
+    "CrossSectionView",
     "DataView",
     "Estimator",
     "Evaluator",
@@ -47,6 +50,7 @@ __all__ = [
     "MeanReturnEvaluator",
     "Model",
     "OOSR2Evaluator",
+    "PanelWeightsOutput",
     "SharpeEvaluator",
     "Splitter",
     "SquaredErrorDiffEvaluator",
@@ -64,4 +68,5 @@ __all__ = [
     "validate_result",
     "walk_forward",
     "walk_forward_forecast",
+    "walk_forward_panel",
 ]
