@@ -79,3 +79,8 @@ forbidden_modules = [
   "numeraire.methods",
   "numeraire.adapters",
 ]
+
+[dependency-groups]
+dev = [
+    "scipy-stubs>=1.17.1.5",
+]

@@ -17,6 +17,8 @@ from numeraire.core.engine import (
     walk_forward_panel,
 )
 from numeraire.core.evaluators import (
+    AlphaEvaluator,
+    ClarkWestEvaluator,
     MeanReturnEvaluator,
     OOSR2Evaluator,
     SharpeEvaluator,
@@ -40,9 +42,18 @@ from numeraire.core.registry import (
 from numeraire.core.schema import RESULT_COLUMNS, validate_result
 from numeraire.core.simulate import RebalanceSchedule, SimulationResult, simulate_weights
 from numeraire.core.splitter import WalkForwardSplitter
+from numeraire.core.stats import (
+    alpha_regression,
+    clark_west,
+    grs_test,
+    newey_west_lrv,
+    sharpe_diff_test,
+)
 
 __all__ = [
     "RESULT_COLUMNS",
+    "AlphaEvaluator",
+    "ClarkWestEvaluator",
     "CrossSectionView",
     "DataView",
     "Estimator",
@@ -63,11 +74,16 @@ __all__ = [
     "TimeSeriesView",
     "WalkForwardSplitter",
     "WeightsOutput",
+    "alpha_regression",
     "available_evaluators",
     "capabilities",
+    "clark_west",
     "config_hash",
     "get_evaluator",
+    "grs_test",
+    "newey_west_lrv",
     "register_evaluator",
+    "sharpe_diff_test",
     "simulate_weights",
     "validate_result",
     "walk_forward",

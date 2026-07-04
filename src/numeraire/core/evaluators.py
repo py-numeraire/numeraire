@@ -12,11 +12,13 @@ from typing import ClassVar, Protocol
 
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 
 from numeraire.core import capabilities
 from numeraire.core.engine import ForecastOutput, PanelWeightsOutput, WeightsOutput
 from numeraire.core.registry import register_evaluator
 from numeraire.core.schema import RESULT_COLUMNS
+from numeraire.core.stats import alpha_regression, newey_west_lrv
 
 
 class _HasProvenance(Protocol):
@@ -159,9 +161,71 @@ class SquaredErrorDiffEvaluator:
         return _frame(rows)
 
 
+class ClarkWestEvaluator:
+    """Clark-West (2007) MSPE-adjusted test of the forecast against its nested benchmark.
+
+    The right significance test to pair with :class:`OOSR2Evaluator` — plain Diebold-Mariano is
+    undersized against a nested benchmark (the historical mean). Multi-asset outputs aggregate the
+    per-origin adjusted loss difference across assets (the pooled companion of
+    :class:`SquaredErrorDiffEvaluator`); one asset is the textbook statistic. Emits two rows:
+    ``cw_t`` and ``cw_p`` (one-sided). Use ``nw_lags = horizon - 1`` for multi-step forecasts.
+    """
+
+    requires: ClassVar[set[str]] = {capabilities.TO_FORECAST}
+
+    def __init__(self, nw_lags: int = 0) -> None:
+        self.nw_lags = nw_lags
+
+    def evaluate(self, oos_output: object) -> pd.DataFrame:
+        if not isinstance(oos_output, ForecastOutput):
+            raise TypeError("ClarkWestEvaluator requires a ForecastOutput")
+        r = oos_output.realized.to_numpy(dtype=np.float64)
+        f = oos_output.forecasts.to_numpy(dtype=np.float64)
+        b = oos_output.benchmark.to_numpy(dtype=np.float64)
+        adj = np.nansum((r - b) ** 2 - ((r - f) ** 2 - (b - f) ** 2), axis=1)
+        n = len(adj)
+        se = float(np.sqrt(newey_west_lrv(adj, self.nw_lags) / n)) if n else float("nan")
+        t_stat = float(adj.mean() / se) if n and se > 0 else float("nan")
+        p = float(norm.sf(t_stat)) if np.isfinite(t_stat) else float("nan")
+        date = oos_output.forecasts.index[-1]
+        return _frame([_row(oos_output, "cw_t", t_stat, date), _row(oos_output, "cw_p", p, date)])
+
+
+class AlphaEvaluator:
+    """Time-series alpha of the strategy vs a factor benchmark (HAC t-stat).
+
+    ``factors`` are per-period factor (excess) returns on the strategy's calendar; rows are
+    inner-joined. Emits ``alpha_ann`` (per-period alpha x ``periods_per_year``) and ``alpha_t``.
+    The volatility-managed-portfolio-style headline regression; ``nw_lags=0`` = White errors.
+    """
+
+    requires: ClassVar[set[str]] = {capabilities.TO_WEIGHTS}
+
+    def __init__(
+        self, factors: pd.DataFrame, *, nw_lags: int = 0, periods_per_year: int = 12
+    ) -> None:
+        self.factors = factors
+        self.nw_lags = nw_lags
+        self.periods_per_year = periods_per_year
+
+    def evaluate(self, oos_output: object) -> pd.DataFrame:
+        if not isinstance(oos_output, WeightsOutput | PanelWeightsOutput):
+            raise TypeError("AlphaEvaluator requires a WeightsOutput or PanelWeightsOutput")
+        s = oos_output.strategy_returns()
+        res = alpha_regression(s, self.factors, nw_lags=self.nw_lags)
+        date = s.index[-1]
+        return _frame(
+            [
+                _row(oos_output, "alpha_ann", res.alpha * self.periods_per_year, date),
+                _row(oos_output, "alpha_t", res.alpha_t, date),
+            ]
+        )
+
+
 # Bundled native evaluators register on import (open registry).
 register_evaluator("sharpe", SharpeEvaluator(), overwrite=True)
 register_evaluator("mean_return", MeanReturnEvaluator(), overwrite=True)
 register_evaluator("strategy_return", StrategyReturnEvaluator(), overwrite=True)
 register_evaluator("oos_r2", OOSR2Evaluator(), overwrite=True)
 register_evaluator("sed", SquaredErrorDiffEvaluator(), overwrite=True)
+register_evaluator("clark_west", ClarkWestEvaluator(), overwrite=True)
