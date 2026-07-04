@@ -36,11 +36,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
+
+from numeraire.core._ingest import to_pandas
 
 Float = NDArray[np.float64]
 
@@ -276,6 +278,9 @@ class TimeSeriesView:
             raise ValueError(
                 f"horizon must be >= 1 (h=0 is a contemporaneous look-ahead); got {horizon}"
             )
+        returns = cast("pd.DataFrame", to_pandas(returns, what="returns"))
+        if features is not None:
+            features = cast("pd.DataFrame", to_pandas(features, what="features"))
         if features is not None and blocks is not None:
             raise ValueError("provide at most one of `features` (shared-calendar) or `blocks`")
         if risk_free is not None:
@@ -601,6 +606,7 @@ class CrossSectionView:
             raise ValueError(
                 f"horizon must be >= 1 (h=0 is a contemporaneous look-ahead); got {horizon}"
             )
+        panel = cast("pd.DataFrame", to_pandas(panel, what="panel"))
         names = list(chars)
         required = [date_col, asset_col, ret, *names]
         missing = [c for c in required if c not in panel.columns]
