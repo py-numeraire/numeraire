@@ -124,6 +124,7 @@ def walk_forward_forecast(
     min_train: int = 20,
     window: int | None = None,
     horizon: int | None = None,
+    refit_every: int = 1,
     method: str,
     config: dict[str, Any] | None = None,
     data_vintage: str = "unknown",
@@ -136,8 +137,17 @@ def walk_forward_forecast(
     (rolling if ``window`` is given, else expanding from the start with ``min_train`` warm-up) and
     asked to forecast the return over ``(t, t+h]``; the engine records the realized return and the
     window historical-mean benchmark. No look-ahead: the forecast uses only data ``<= t`` and the
-    target is strictly future. ``n_jobs`` fans the independent origins over a thread pool
-    (``-1`` = all cores); results are order-preserved, so the output is identical to ``n_jobs=1``.
+    target is strictly future.
+
+    ``refit_every`` decouples the refit cadence from the prediction cadence (the ML-cross-section
+    protocol: e.g. annual refits with monthly predictions = ``refit_every=12`` on a monthly
+    calendar): the model is re-fit on every ``refit_every``-th origin and reused for the origins in
+    between, whose forecasts still consume each origin's own up-to-date PIT window (fresh features,
+    stale parameters — never stale information). The benchmark stays the per-origin prevailing
+    mean regardless. Include ``refit_every`` in ``config`` for provenance if you sweep it.
+
+    ``n_jobs`` fans the independent refit blocks over a thread pool (``-1`` = all cores);
+    results are order-preserved, so the output is identical to ``n_jobs=1``.
     """
     h = view.horizon if horizon is None else horizon
     chash = config_hash(config)
@@ -148,22 +158,33 @@ def walk_forward_forecast(
     warmup = window if window is not None else min_train
     if warmup < 1:
         raise ValueError("need a positive window / min_train warm-up")
+    if refit_every < 1:
+        raise ValueError(f"refit_every must be >= 1; got {refit_every}")
 
-    def _run(j: int) -> tuple[pd.Timestamp, Float, Float, Float]:
-        origin = cal[j]
-        train = view.window(origin)
-        if window is not None:
-            train = train.tail(window)
-        model = estimator.fit(train)
+    def _train_at(j: int) -> TimeSeriesView:
+        train = view.window(cal[j])
+        return train.tail(window) if window is not None else train
+
+    def _run_block(block: list[int]) -> list[tuple[pd.Timestamp, Float, Float, Float]]:
+        model = estimator.fit(_train_at(block[0]))
         if capabilities.TO_FORECAST not in model.capabilities() or not isinstance(
             model, SupportsForecast
         ):
             raise TypeError(f"{method}: fitted model does not support 'to_forecast'")
-        f = model.forecast(train)
-        bench = train.returns_frame().to_numpy(dtype=np.float64).mean(axis=0)
-        return origin, f.to_numpy(dtype=np.float64), bench, view.target_asof(origin, horizon=h)
+        rows: list[tuple[pd.Timestamp, Float, Float, Float]] = []
+        for j in block:
+            origin = cal[j]
+            train = _train_at(j)
+            f = model.forecast(train)
+            bench = train.returns_frame().to_numpy(dtype=np.float64).mean(axis=0)
+            rows.append(
+                (origin, f.to_numpy(dtype=np.float64), bench, view.target_asof(origin, horizon=h))
+            )
+        return rows
 
-    rows = _map_folds(_run, list(range(warmup - 1, n - h)), n_jobs)
+    origins = list(range(warmup - 1, n - h))
+    blocks = [origins[i : i + refit_every] for i in range(0, len(origins), refit_every)]
+    rows = [r for block_rows in _map_folds(_run_block, blocks, n_jobs) for r in block_rows]
     idx: list[pd.Timestamp] = [r[0] for r in rows]
     f_rows: list[Float] = [r[1] for r in rows]
     b_rows: list[Float] = [r[2] for r in rows]

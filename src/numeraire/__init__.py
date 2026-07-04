@@ -41,7 +41,7 @@ from numeraire.core.registry import (
 )
 from numeraire.core.schema import RESULT_COLUMNS, validate_result
 from numeraire.core.simulate import RebalanceSchedule, SimulationResult, simulate_weights
-from numeraire.core.splitter import WalkForwardSplitter
+from numeraire.core.splitter import WalkForwardSplitter, validation_split
 from numeraire.core.stats import (
     alpha_regression,
     clark_west,
@@ -86,6 +86,7 @@ __all__ = [
     "sharpe_diff_test",
     "simulate_weights",
     "validate_result",
+    "validation_split",
     "walk_forward",
     "walk_forward_forecast",
     "walk_forward_panel",
