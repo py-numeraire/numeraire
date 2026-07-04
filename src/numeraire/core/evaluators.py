@@ -18,7 +18,7 @@ from numeraire.core import capabilities
 from numeraire.core.engine import ForecastOutput, PanelWeightsOutput, WeightsOutput
 from numeraire.core.registry import register_evaluator
 from numeraire.core.schema import RESULT_COLUMNS
-from numeraire.core.stats import alpha_regression, newey_west_lrv
+from numeraire.core.stats import alpha_regression, certainty_equivalent, newey_west_lrv
 
 
 class _HasProvenance(Protocol):
@@ -222,8 +222,31 @@ class AlphaEvaluator:
         )
 
 
+class CEQEvaluator:
+    """DGU (2009) certainty-equivalent return of the realized strategy returns (economic value).
+
+    ``ceq = mean - gamma/2 * var`` of the per-period strategy returns (``gamma`` = risk aversion,
+    DGU report ``gamma=1``). Emitted per-period, in the input's units — DGU's Table 4 CEQ figures
+    are monthly — so it is *not* annualized (unlike :class:`SharpeEvaluator`). The economic-value
+    companion to the risk-adjusted :class:`SharpeEvaluator` in a 1/N-style horse race.
+    """
+
+    requires: ClassVar[set[str]] = {capabilities.TO_WEIGHTS}
+
+    def __init__(self, gamma: float = 1.0) -> None:
+        self.gamma = gamma
+
+    def evaluate(self, oos_output: object) -> pd.DataFrame:
+        if not isinstance(oos_output, WeightsOutput | PanelWeightsOutput):
+            raise TypeError("CEQEvaluator requires a WeightsOutput or PanelWeightsOutput")
+        s = oos_output.strategy_returns()
+        ceq = certainty_equivalent(s.to_numpy(dtype=np.float64), self.gamma)
+        return _frame([_row(oos_output, "ceq", ceq, s.index[-1])])
+
+
 # Bundled native evaluators register on import (open registry).
 register_evaluator("sharpe", SharpeEvaluator(), overwrite=True)
+register_evaluator("ceq", CEQEvaluator(), overwrite=True)
 register_evaluator("mean_return", MeanReturnEvaluator(), overwrite=True)
 register_evaluator("strategy_return", StrategyReturnEvaluator(), overwrite=True)
 register_evaluator("oos_r2", OOSR2Evaluator(), overwrite=True)
