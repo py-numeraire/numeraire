@@ -43,6 +43,21 @@ def _resolve_workers(n_jobs: int) -> int:
     return n_jobs
 
 
+def _even_chunks(items: Sequence[_T], k: int) -> list[Sequence[_T]]:
+    """Split ``items`` into ``k`` contiguous, near-even chunks (order preserved, no empties)."""
+    n = len(items)
+    base, extra = divmod(n, k)
+    chunks: list[Sequence[_T]] = []
+    start = 0
+    for i in range(k):
+        size = base + (1 if i < extra else 0)
+        if size == 0:
+            continue  # more chunks requested than items — skip the empty tail
+        chunks.append(items[start : start + size])
+        start += size
+    return chunks
+
+
 def _map_folds(fn: Callable[[_T], _R], items: Sequence[_T], n_jobs: int) -> list[_R]:
     """Map ``fn`` over independent fold work, order-preserving (so results stay deterministic).
 
@@ -50,14 +65,28 @@ def _map_folds(fn: Callable[[_T], _R], items: Sequence[_T], n_jobs: int) -> list
     other value uses a **thread** pool, chosen over processes because (a) it works with any
     estimator (no pickling / closure limits, so it is safe to turn on by default) and (b)
     asset-pricing fits are BLAS-bound and NumPy/SciPy release the GIL during the heavy linear
-    algebra, so threads parallelize the real work. Determinism is preserved: each
-    fold is a pure function of ``(estimator, train, test)`` and :meth:`ThreadPoolExecutor.map`
-    yields results in input order, so a parallel run reassembles bit-for-bit like the serial one.
+    algebra, so threads parallelize the real work.
+
+    Work is **batched** into ~4x-workers contiguous chunks rather than submitted one task per
+    fold: with many short folds the per-submit / future bookkeeping cost dominates, so amortizing
+    it over a handful of folds per task cuts overhead, while 4x-workers (rather than exactly
+    workers) keeps the pool load-balanced when fold costs vary. Determinism is preserved: each
+    fold is a pure function of ``(estimator, train, test)``, chunks are contiguous, and
+    :meth:`ThreadPoolExecutor.map` yields chunk results in input order, so the flattened output
+    reassembles bit-for-bit like the serial one.
     """
-    if n_jobs == 1:
+    if n_jobs == 1 or len(items) <= 1:
         return [fn(it) for it in items]
-    with ThreadPoolExecutor(max_workers=_resolve_workers(n_jobs)) as pool:
-        return list(pool.map(fn, items))
+    workers = _resolve_workers(n_jobs)
+    if workers == 1:
+        return [fn(it) for it in items]
+    chunks = _even_chunks(items, min(len(items), 4 * workers))
+
+    def _run_chunk(chunk: Sequence[_T]) -> list[_R]:
+        return [fn(it) for it in chunk]
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return [r for chunk_res in pool.map(_run_chunk, chunks) for r in chunk_res]
 
 
 @dataclass(frozen=True)

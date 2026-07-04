@@ -13,6 +13,8 @@ from conftest import make_monthly_view, toy_panel_wide
 from numeraire.core import capabilities
 from numeraire.core.data import CrossSectionView, TimeSeriesView
 from numeraire.core.engine import (
+    _even_chunks,
+    _map_folds,
     _resolve_workers,
     walk_forward,
     walk_forward_forecast,
@@ -89,6 +91,26 @@ class _XSEstimator:
         _keys, x, y = view.aligned()
         beta, *_ = np.linalg.lstsq(x, y, rcond=None)
         return _XSModel(beta)
+
+
+def test_even_chunks_partition_is_contiguous_and_complete() -> None:
+    items = list(range(23))
+    for k in (1, 3, 4, 8, 50):
+        chunks = _even_chunks(items, k)
+        assert [x for c in chunks for x in c] == items  # order-preserving, no drops/dups
+        assert all(len(c) > 0 for c in chunks)  # no empty chunks
+        sizes = [len(c) for c in chunks]
+        assert max(sizes) - min(sizes) <= 1  # near-even
+        assert len(chunks) == min(len(items), k)
+
+
+def test_map_folds_batched_matches_serial() -> None:
+    items = list(range(100))
+    square = lambda x: x * x  # noqa: E731
+    serial = _map_folds(square, items, n_jobs=1)
+    for n_jobs in (2, 4, -1):
+        assert _map_folds(square, items, n_jobs=n_jobs) == serial  # order + values preserved
+    assert _map_folds(square, [], n_jobs=4) == []  # empty is a no-op
 
 
 def test_resolve_workers() -> None:
