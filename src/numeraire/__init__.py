@@ -18,6 +18,7 @@ from numeraire.core.engine import (
 )
 from numeraire.core.evaluators import (
     AlphaEvaluator,
+    CEQEvaluator,
     ClarkWestEvaluator,
     MeanReturnEvaluator,
     OOSR2Evaluator,
@@ -45,15 +46,19 @@ from numeraire.core.splitter import WalkForwardSplitter, validation_split
 from numeraire.core.stats import (
     adjust_tests,
     alpha_regression,
+    certainty_equivalent,
     clark_west,
     grs_test,
     newey_west_lrv,
+    performance_fee,
+    return_loss,
     sharpe_diff_test,
 )
 
 __all__ = [
     "RESULT_COLUMNS",
     "AlphaEvaluator",
+    "CEQEvaluator",
     "ClarkWestEvaluator",
     "CrossSectionView",
     "DataView",
@@ -79,12 +84,15 @@ __all__ = [
     "alpha_regression",
     "available_evaluators",
     "capabilities",
+    "certainty_equivalent",
     "clark_west",
     "config_hash",
     "get_evaluator",
     "grs_test",
     "newey_west_lrv",
+    "performance_fee",
     "register_evaluator",
+    "return_loss",
     "sharpe_diff_test",
     "simulate_weights",
     "validate_result",

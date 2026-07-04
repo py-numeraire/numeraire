@@ -14,8 +14,18 @@ Small, closed-form statistical tests the evaluator layer and golden tests build 
   Benjamini-Yekutieli), the Harvey-Liu-Zhu (2016) toolbox behind the "t > 3.0" hurdle.
 - :func:`newey_west_lrv` — the shared Bartlett-kernel long-run variance helper.
 
-All functions take plain arrays/frames and return frozen result dataclasses; evaluator classes in
-:mod:`numeraire.core.evaluators` adapt them to OOS outputs and the tidy result schema.
+The mean-variance *economic-value* family (the 1/N-horse-race metrics):
+
+- :func:`certainty_equivalent` — DeMiguel-Garlappi-Uppal (2009) eq. 12 certainty-equivalent return
+  of a strategy's realized returns (``mean - gamma/2 var``); their headline utility metric.
+- :func:`return_loss` — DGU (2009) eq. 17 return-loss of a strategy vs a benchmark (the extra
+  return the benchmark's Sharpe line delivers at the strategy's risk, net of the strategy's mean).
+- :func:`performance_fee` — Fleming-Kirby-Ostdiek quadratic-utility performance fee: the per-period
+  fee equating ``E[U(benchmark)]`` and ``E[U(candidate - fee)]``.
+
+All functions take plain arrays/frames and return frozen result dataclasses (or a scalar for the
+economic-value metrics); evaluator classes in :mod:`numeraire.core.evaluators` adapt them to OOS
+outputs and the tidy result schema.
 """
 
 from __future__ import annotations
@@ -306,3 +316,70 @@ def alpha_regression(
         r2=1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan"),
         n_obs=t_n,
     )
+
+
+# --------------------------------------------------------------------------------- economic value
+
+
+def certainty_equivalent(returns: Float, gamma: float = 1.0, *, ddof: int = 0) -> float:
+    """DGU (2009) eq. 12 certainty-equivalent return: ``mean - (gamma/2) * var``.
+
+    The per-period CEQ of a mean-variance investor holding ``returns`` (a realized OOS strategy
+    return series). ``gamma`` is risk aversion (DGU report ``gamma=1``); ``ddof=0`` matches their
+    tabulated (MLE) variance. Same units/frequency as the input — DGU's tables are monthly. Higher
+    is better. NaNs are dropped; fewer than two observations yields NaN.
+    """
+    r = np.asarray(returns, dtype=np.float64)
+    r = r[~np.isnan(r)]
+    if r.size < 2:
+        return float("nan")
+    return float(r.mean() - 0.5 * gamma * r.var(ddof=ddof))
+
+
+def return_loss(candidate: Float, benchmark: Float, *, ddof: int = 0) -> float:
+    """DGU (2009) eq. 17 return-loss of ``candidate`` relative to ``benchmark``.
+
+    The additional expected return the benchmark would earn on its own risk-return line at the
+    candidate's risk, minus the candidate's own mean:
+    ``(mean_bench / std_bench) * std_cand - mean_cand``. **Positive => the candidate underperforms**
+    the benchmark's Sharpe trade-off (the DGU sign convention). Both are aligned per-period return
+    series; NaNs are dropped pairwise. ``ddof=0`` matches DGU's MLE moments.
+    """
+    c = np.asarray(candidate, dtype=np.float64)
+    b = np.asarray(benchmark, dtype=np.float64)
+    if c.shape != b.shape or c.ndim != 1:
+        raise ValueError("candidate and benchmark must be aligned 1-D return series")
+    keep = ~(np.isnan(c) | np.isnan(b))
+    c, b = c[keep], b[keep]
+    sd_b = float(b.std(ddof=ddof))
+    if c.size < 2 or sd_b == 0.0:
+        return float("nan")
+    return float((b.mean() / sd_b) * float(c.std(ddof=ddof)) - c.mean())
+
+
+def performance_fee(candidate: Float, benchmark: Float, gamma: float) -> float:
+    """Quadratic-utility performance fee (Fleming-Kirby-Ostdiek; Kirby-Ostdiek 2012 eq. 23).
+
+    The maximum per-period fee an investor with ``U(R) = R - gamma/2 R^2`` would pay to switch from
+    ``benchmark`` to ``candidate`` (both **raw** return series): the ``fee`` solving
+    ``E[U(benchmark)] = E[U(candidate - fee)]``. Annualize as ``fee * periods`` (``* 1e4`` for
+    bp/yr). Positive => the candidate is worth paying for; NaN when no real fee equates the two
+    utilities (a deeply dominated candidate). NaNs are dropped pairwise.
+    """
+    ri = np.asarray(benchmark, dtype=np.float64)
+    rj = np.asarray(candidate, dtype=np.float64)
+    if ri.shape != rj.shape or ri.ndim != 1:
+        raise ValueError("candidate and benchmark must be aligned 1-D raw return series")
+    keep = ~(np.isnan(ri) | np.isnan(rj))
+    ri, rj = ri[keep], rj[keep]
+    if ri.size == 0:
+        return float("nan")
+
+    def eu(r: Float) -> float:
+        return float(r.mean() - gamma / 2.0 * (r**2).mean())
+
+    a = 1.0 - gamma * float(rj.mean())
+    disc = a**2 - 2.0 * gamma * (eu(ri) - eu(rj))
+    if disc < 0:
+        return float("nan")
+    return (-a + float(np.sqrt(disc))) / gamma
