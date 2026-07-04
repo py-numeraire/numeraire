@@ -110,3 +110,48 @@ def test_risk_free_missing_dates_rejected() -> None:
     rf = pd.Series([0.01, 0.01], index=index[:2])  # missing the last date
     with pytest.raises(ValueError, match="risk_free is missing"):
         TimeSeriesView(raw, raw, risk_free=rf)
+
+
+# -- returns-only view (no features / no blocks) --------------------------------
+
+
+def _returns_only_view() -> TimeSeriesView:
+    index = pd.date_range("2000-01-31", periods=6, freq="ME")
+    returns = pd.DataFrame({"r0": [0.01, 0.02, -0.03, 0.04, 0.05, -0.01]}, index=index)
+    return TimeSeriesView(returns, horizon=1)
+
+
+def test_returns_only_has_no_features() -> None:
+    v = _returns_only_view()
+    assert v.feature_names == []
+    ff = v.features_frame()
+    assert ff.shape == (6, 0)
+    assert list(ff.columns) == []
+    assert isinstance(v, DataView)
+
+
+def test_returns_only_aligned_zero_width_x() -> None:
+    v = _returns_only_view()
+    dates, x, y = v.aligned()
+    assert x.shape == (5, 0)  # one row per realizable origin, zero predictors
+    assert y.shape == (5, 1)
+    assert len(dates) == 5
+    # the returns target is unchanged by the absence of features
+    np.testing.assert_allclose(y.ravel(), [0.02, -0.03, 0.04, 0.05, -0.01])
+
+
+def test_returns_only_windows_and_ejects() -> None:
+    v = _returns_only_view()
+    w = v.window(v.calendar[3])
+    assert w.features_frame().shape == (4, 0)
+    assert w.returns_frame().shape == (4, 1)
+    # empty calendar slice still yields a (0, 0) feature frame, not an error
+    empty = v.between(v.calendar[-1], v.calendar[-1])
+    assert empty.features_frame().shape == (0, 0)
+
+
+def test_features_and_blocks_are_mutually_exclusive() -> None:
+    index = pd.date_range("2000-01-31", periods=3, freq="ME")
+    df = pd.DataFrame({"r0": [0.0, 0.0, 0.0]}, index=index)
+    with pytest.raises(ValueError, match="at most one"):
+        TimeSeriesView(df, df, blocks=[], horizon=1)

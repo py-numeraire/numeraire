@@ -68,11 +68,11 @@ def test_features_arg_is_a_lag0_block_backcompat() -> None:
     np.testing.assert_array_equal(legacy.features_asof(t), [3.0])
 
 
-def test_exactly_one_of_features_or_blocks() -> None:
+def test_features_and_blocks_are_mutually_exclusive() -> None:
     feats = pd.DataFrame(
         {"x": np.zeros(3)}, index=pd.date_range("2000-01-31", periods=3, freq="ME")
     )
-    with pytest.raises(ValueError, match="exactly one"):
+    with pytest.raises(ValueError, match="at most one"):
         TimeSeriesView(_returns(3), feats, blocks=[FeatureBlock(feats)])
-    with pytest.raises(ValueError, match="exactly one"):
-        TimeSeriesView(_returns(3))
+    # neither features nor blocks is a valid returns-only view (no predictors)
+    assert TimeSeriesView(_returns(3)).feature_names == []

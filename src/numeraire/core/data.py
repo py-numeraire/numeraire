@@ -241,6 +241,9 @@ class TimeSeriesView:
     features:
         Convenience single-block input: a ``(date x feature)`` frame sharing the returns index,
         wrapped as one ``lag=0`` :class:`FeatureBlock`. Mutually exclusive with ``blocks``.
+        Omit both ``features`` and ``blocks`` for a **returns-only** view (market-timing /
+        moment-based strategies that read only the returns block): ``feature_names`` is then empty
+        and :meth:`features_frame` / :meth:`aligned` yield a zero-column ``X``.
     blocks:
         Explicit list of :class:`FeatureBlock` — each with its own calendar and availability lag.
         Use this to combine heterogeneous macro sources (e.g. FRED ``lag=1`` + another ``lag=2`` +
@@ -255,7 +258,8 @@ class TimeSeriesView:
     -----
     With ``features``, that frame must share the returns ``DatetimeIndex`` (the original behaviour).
     With ``blocks``, each block keeps its own calendar and is aligned to the returns calendar by its
-    own lag-aware :meth:`FeatureBlock.asof`.
+    own lag-aware :meth:`FeatureBlock.asof`. With neither, the view is returns-only: no feature
+    blocks, so every ``X`` is shaped ``(T x 0)`` and ``aligned`` yields the returns targets alone.
     """
 
     def __init__(
@@ -272,8 +276,8 @@ class TimeSeriesView:
             raise ValueError(
                 f"horizon must be >= 1 (h=0 is a contemporaneous look-ahead); got {horizon}"
             )
-        if (features is None) == (blocks is None):
-            raise ValueError("provide exactly one of `features` (shared-calendar) or `blocks`")
+        if features is not None and blocks is not None:
+            raise ValueError("provide at most one of `features` (shared-calendar) or `blocks`")
         if risk_free is not None:
             returns = _to_excess(returns, risk_free, excess)
         index = returns.index
@@ -286,7 +290,8 @@ class TimeSeriesView:
             if not returns.index.equals(features.index):
                 raise ValueError("returns and `features` must share one identical DatetimeIndex")
             blocks = [FeatureBlock(features, lag=0, name=None)]
-        assert blocks is not None
+        elif blocks is None:
+            blocks = []  # returns-only view: no predictors, X has zero columns
 
         self._dates: pd.DatetimeIndex = index
         self._assets: list[str] = [str(c) for c in returns.columns]
@@ -314,6 +319,8 @@ class TimeSeriesView:
 
     def _features_vec(self, t: object) -> Float:
         """Concatenated lag-aware feature vector across all blocks, as known at ``t``."""
+        if not self._blocks:
+            return np.empty(0, dtype=np.float64)  # returns-only view
         return np.concatenate([b.asof(t) for b in self._blocks])
 
     # -- DataView protocol ----------------------------------------------------
