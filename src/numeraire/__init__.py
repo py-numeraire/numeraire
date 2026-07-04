@@ -38,6 +38,7 @@ from numeraire.core.registry import (
     register_evaluator,
 )
 from numeraire.core.schema import RESULT_COLUMNS, validate_result
+from numeraire.core.simulate import RebalanceSchedule, SimulationResult, simulate_weights
 from numeraire.core.splitter import WalkForwardSplitter
 
 __all__ = [
@@ -51,7 +52,9 @@ __all__ = [
     "Model",
     "OOSR2Evaluator",
     "PanelWeightsOutput",
+    "RebalanceSchedule",
     "SharpeEvaluator",
+    "SimulationResult",
     "Splitter",
     "SquaredErrorDiffEvaluator",
     "StrategyReturnEvaluator",
@@ -65,6 +68,7 @@ __all__ = [
     "config_hash",
     "get_evaluator",
     "register_evaluator",
+    "simulate_weights",
     "validate_result",
     "walk_forward",
     "walk_forward_forecast",
