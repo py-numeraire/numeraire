@@ -798,7 +798,7 @@ requires-dist = [
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.5" },
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'docs'", specifier = ">=0.25" },
     { name = "numpy", specifier = ">=1.26" },
-    { name = "pandas", specifier = ">=2.0" },
+    { name = "pandas", specifier = ">=2.2" },
     { name = "pandas-stubs", marker = "extra == 'dev'", specifier = ">=2.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
