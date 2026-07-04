@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from numeraire.core import capabilities
-from numeraire.core.engine import ForecastOutput, WeightsOutput
+from numeraire.core.engine import ForecastOutput, PanelWeightsOutput, WeightsOutput
 from numeraire.core.registry import register_evaluator
 from numeraire.core.schema import RESULT_COLUMNS
 
@@ -63,17 +63,17 @@ class SharpeEvaluator:
         self.periods_per_year = periods_per_year
 
     def evaluate(self, oos_output: object) -> pd.DataFrame:
-        if not isinstance(oos_output, WeightsOutput):
-            raise TypeError("SharpeEvaluator requires a WeightsOutput")
-        r = oos_output.strategy_returns().to_numpy(dtype=np.float64)
+        if not isinstance(oos_output, WeightsOutput | PanelWeightsOutput):
+            raise TypeError("SharpeEvaluator requires a WeightsOutput or PanelWeightsOutput")
+        s = oos_output.strategy_returns()
+        r = s.to_numpy(dtype=np.float64)
         r = r[~np.isnan(r)]
         ann = float(np.sqrt(self.periods_per_year))
         if r.size < 2 or float(np.std(r, ddof=1)) == 0.0:
             sharpe = float("nan")
         else:
             sharpe = float(np.mean(r) / np.std(r, ddof=1)) * ann
-        date = oos_output.weights.index[-1]
-        return _frame([_row(oos_output, "sharpe", sharpe, date)])
+        return _frame([_row(oos_output, "sharpe", sharpe, s.index[-1])])
 
 
 class MeanReturnEvaluator:
@@ -85,13 +85,13 @@ class MeanReturnEvaluator:
         self.periods_per_year = periods_per_year
 
     def evaluate(self, oos_output: object) -> pd.DataFrame:
-        if not isinstance(oos_output, WeightsOutput):
-            raise TypeError("MeanReturnEvaluator requires a WeightsOutput")
-        r = oos_output.strategy_returns().to_numpy(dtype=np.float64)
+        if not isinstance(oos_output, WeightsOutput | PanelWeightsOutput):
+            raise TypeError("MeanReturnEvaluator requires a WeightsOutput or PanelWeightsOutput")
+        s = oos_output.strategy_returns()
+        r = s.to_numpy(dtype=np.float64)
         r = r[~np.isnan(r)]
         mean = float(np.mean(r)) * self.periods_per_year if r.size else float("nan")
-        date = oos_output.weights.index[-1]
-        return _frame([_row(oos_output, "mean_return", mean, date)])
+        return _frame([_row(oos_output, "mean_return", mean, s.index[-1])])
 
 
 class OOSR2Evaluator:
@@ -128,8 +128,10 @@ class StrategyReturnEvaluator:
     requires: ClassVar[set[str]] = {capabilities.TO_WEIGHTS}
 
     def evaluate(self, oos_output: object) -> pd.DataFrame:
-        if not isinstance(oos_output, WeightsOutput):
-            raise TypeError("StrategyReturnEvaluator requires a WeightsOutput")
+        if not isinstance(oos_output, WeightsOutput | PanelWeightsOutput):
+            raise TypeError(
+                "StrategyReturnEvaluator requires a WeightsOutput or PanelWeightsOutput"
+            )
         s = oos_output.strategy_returns()
         rows = [_row(oos_output, "strategy_return", float(v), t) for t, v in s.items()]
         return _frame(rows)

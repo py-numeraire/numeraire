@@ -281,6 +281,12 @@ class PanelWeightsOutput:
     capability: str = capabilities.TO_WEIGHTS
     meta: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def universe(self) -> str:
+        """Compact universe label (``n=<#assets>`` over the OOS panel; the name if single)."""
+        names = self.weights.index.get_level_values("asset").unique()
+        return str(names[0]) if len(names) == 1 else f"n={len(names)}"
+
     def strategy_returns(self) -> pd.Series:
         """Cross-sectional portfolio return per date: ``sum_a weights[t, a] * realized[t, a]``."""
         prod = self.weights * self.realized
@@ -290,13 +296,13 @@ class PanelWeightsOutput:
 def _panel_realized(view: CrossSectionView, keys: pd.MultiIndex, horizon: int) -> pd.Series:
     """Forward return over ``(t, t+h]`` for each ``(date, asset)`` key (``nan`` on delisting)."""
     dates = keys.get_level_values("date")
-    assets = keys.get_level_values("asset")
+    assets = keys.get_level_values("asset").to_numpy()
     out = np.full(len(keys), np.nan, dtype=np.float64)
     for t in pd.DatetimeIndex(dates).unique():
         ids, y = view.target_asof(t, horizon=horizon)
-        by_asset = dict(zip(ids, y, strict=True))
-        for pos in np.flatnonzero(dates == t):
-            out[int(pos)] = by_asset.get(assets[int(pos)], np.nan)
+        pos = np.flatnonzero(dates == t)
+        cross = pd.Series(y, index=pd.Index(ids))
+        out[pos] = cross.reindex(assets[pos]).to_numpy(dtype=np.float64)
     return pd.Series(out, index=keys, name="realized")
 
 
