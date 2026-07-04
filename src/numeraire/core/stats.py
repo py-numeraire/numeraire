@@ -10,6 +10,8 @@ Small, closed-form statistical tests the evaluator layer and golden tests build 
   (the companion to the Goyal-Welch OOS R²; plain Diebold-Mariano is oversized for nested models).
 - :func:`alpha_regression` — time-series alpha vs a factor benchmark with HAC (Newey-West)
   standard errors (the volatility-managed-portfolio-style headline regression).
+- :func:`adjust_tests` — multiple-testing adjustments for factor-zoo sweeps (Bonferroni, Holm,
+  Benjamini-Yekutieli), the Harvey-Liu-Zhu (2016) toolbox behind the "t > 3.0" hurdle.
 - :func:`newey_west_lrv` — the shared Bartlett-kernel long-run variance helper.
 
 All functions take plain arrays/frames and return frozen result dataclasses; evaluator classes in
@@ -22,6 +24,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 from scipy import stats as _sps
 
 from numeraire.core.data import Float
@@ -45,6 +48,65 @@ def newey_west_lrv(x: Float, lags: int = 0) -> float:
         w = 1.0 - lag / (lags + 1.0)
         lrv += 2.0 * w * float(v[lag:] @ v[:-lag]) / n
     return lrv
+
+
+_MT_METHODS = ("bonferroni", "holm", "bhy")
+
+
+@dataclass(frozen=True)
+class MultipleTestResult:
+    """Multiple-testing adjustment over a family of p-values (original input order)."""
+
+    method: str
+    alpha: float
+    n_tests: int
+    rejected: NDArray[np.bool_]
+    adjusted_p: Float
+
+
+def adjust_tests(
+    p_values: Float, *, method: str = "bhy", alpha: float = 0.05
+) -> MultipleTestResult:
+    """Multiple-testing adjustment for a family of tests (Harvey-Liu-Zhu 2016 §4.4 toolbox).
+
+    - ``bonferroni`` (single-step, FWER): reject ``p_i <= alpha / M``.
+    - ``holm`` (step-down, FWER): order ascending, reject while ``p_(k) <= alpha / (M + 1 - k)``.
+    - ``bhy`` (Benjamini-Yekutieli step-up, FDR under arbitrary dependence):
+      ``k* = max{k : p_(k) <= k * alpha / (M * c(M))}`` with ``c(M) = sum_{j<=M} 1/j``;
+      reject the ``k*`` smallest.
+
+    Adjusted p-values follow the standard conventions (min-with-1, running max/min so rejection
+    by ``adjusted_p <= alpha`` matches the sequential rule). HLZ's headline: with the factor
+    zoo's family size, a new factor needs roughly ``t > 3.0`` (BHY 1%) rather than 1.96.
+    """
+    if method not in _MT_METHODS:
+        raise ValueError(f"method must be one of {_MT_METHODS}; got {method!r}")
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha must be in (0, 1); got {alpha}")
+    p = np.asarray(p_values, dtype=np.float64)
+    if p.ndim != 1 or len(p) == 0:
+        raise ValueError("p_values must be a non-empty 1-D array")
+    if (p < 0).any() or (p > 1).any():
+        raise ValueError("p_values must lie in [0, 1]")
+    m = len(p)
+    order = np.argsort(p, kind="stable")
+    ps = p[order]
+    adj_sorted = np.empty(m, dtype=np.float64)
+    if method == "bonferroni":
+        adj_sorted = np.minimum(m * ps, 1.0)
+    elif method == "holm":
+        # running max of (M + 1 - k) * p_(k) preserves the step-down rejection order
+        adj_sorted = np.minimum(np.maximum.accumulate((m - np.arange(m)) * ps), 1.0)
+    else:  # bhy
+        c_m = float((1.0 / np.arange(1, m + 1)).sum())
+        raw = m * c_m / np.arange(1, m + 1) * ps
+        adj_sorted = np.minimum(np.minimum.accumulate(raw[::-1])[::-1], 1.0)
+    adjusted = np.empty(m, dtype=np.float64)
+    adjusted[order] = adj_sorted
+    rejected = adjusted <= alpha
+    return MultipleTestResult(
+        method=method, alpha=alpha, n_tests=m, rejected=rejected, adjusted_p=adjusted
+    )
 
 
 @dataclass(frozen=True)

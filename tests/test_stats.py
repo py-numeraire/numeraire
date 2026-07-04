@@ -197,3 +197,62 @@ def test_alpha_evaluator_emits_schema_rows() -> None:
     alpha_t = float(rows.loc[rows["metric"] == "alpha_t", "value"].iloc[0])
     np.testing.assert_allclose(alpha_ann, 0.003 * 12, atol=0.01)
     assert alpha_t > 3.0
+
+
+def test_adjust_tests_hlz_table4_worked_example() -> None:
+    # HLZ (2016) Table 4: 10 t-ratios, alpha_w = alpha_d = 5%, two-sided normal p-values.
+    # Paper: Bonferroni rejects 3 (tests 4, 7, 8), BHY rejects 6 (tests 2, 4, 6, 7, 8, 9).
+    from scipy.stats import norm as _norm
+
+    from numeraire import adjust_tests
+
+    t = np.array([1.99, 2.63, 2.21, 3.43, 2.17, 2.64, 4.56, 5.34, 2.75, 2.49])
+    p = 2.0 * _norm.sf(t)
+    bonf = adjust_tests(p, method="bonferroni", alpha=0.05)
+    assert set(np.flatnonzero(bonf.rejected)) == {3, 6, 7}  # tests 4, 7, 8 (0-based)
+    bhy = adjust_tests(p, method="bhy", alpha=0.05)
+    assert set(np.flatnonzero(bhy.rejected)) == {1, 3, 5, 6, 7, 8}  # tests 2, 4, 6, 7, 8, 9
+    # Holm: the paper reports 4 rejections from its rounded display p-values; on exact normal
+    # p-values the k=5 comparison sits 4e-5 INSIDE the threshold (p=0.008291 <= 0.05/6), so the
+    # exact step-down continues through k=6. Assert the exact-arithmetic outcome and the
+    # containment invariants rather than the display-rounded count.
+    holm = adjust_tests(p, method="holm", alpha=0.05)
+    assert set(np.flatnonzero(holm.rejected)) == {1, 3, 5, 6, 7, 8}
+    assert set(np.flatnonzero(bonf.rejected)) <= set(np.flatnonzero(holm.rejected))
+    assert set(np.flatnonzero(holm.rejected)) <= set(np.flatnonzero(bhy.rejected))
+
+
+def test_adjust_tests_mechanics_with_robust_margins() -> None:
+    from numeraire import adjust_tests
+
+    p = np.array([0.001, 0.011, 0.02, 0.8])
+    # Bonferroni (M=4): thresholds p <= 0.0125 -> rejects 0 and 1
+    assert list(adjust_tests(p, method="bonferroni", alpha=0.05).rejected) == [
+        True,
+        True,
+        False,
+        False,
+    ]
+    # Holm: k=1 vs 0.0125 ok, k=2 vs 0.05/3=0.0167 ok, k=3 vs 0.025 ok, k=4 vs 0.05 stops
+    assert list(adjust_tests(p, method="holm", alpha=0.05).rejected) == [
+        True,
+        True,
+        True,
+        False,
+    ]
+    # adjusted-p monotonicity: sorted adjusted values are non-decreasing for every method
+    for method in ("bonferroni", "holm", "bhy"):
+        adj = adjust_tests(p, method=method, alpha=0.05).adjusted_p
+        assert (np.diff(np.sort(adj)) >= -1e-15).all()
+        assert (adj >= p - 1e-15).all()  # adjustment never makes a test easier
+
+
+def test_adjust_tests_guards() -> None:
+    from numeraire import adjust_tests
+
+    with pytest.raises(ValueError, match="method"):
+        adjust_tests(np.array([0.01]), method="fdr")
+    with pytest.raises(ValueError, match="alpha"):
+        adjust_tests(np.array([0.01]), alpha=1.5)
+    with pytest.raises(ValueError, match="p_values"):
+        adjust_tests(np.array([0.5, 1.2]))

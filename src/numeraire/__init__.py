@@ -43,6 +43,7 @@ from numeraire.core.schema import RESULT_COLUMNS, validate_result
 from numeraire.core.simulate import RebalanceSchedule, SimulationResult, simulate_weights
 from numeraire.core.splitter import WalkForwardSplitter, validation_split
 from numeraire.core.stats import (
+    adjust_tests,
     alpha_regression,
     clark_west,
     grs_test,
@@ -74,6 +75,7 @@ __all__ = [
     "TimeSeriesView",
     "WalkForwardSplitter",
     "WeightsOutput",
+    "adjust_tests",
     "alpha_regression",
     "available_evaluators",
     "capabilities",
