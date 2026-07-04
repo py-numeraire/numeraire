@@ -3,6 +3,9 @@ on:
   push: { branches: [main] }
   pull_request:
 jobs:
+  # The single required check (branch protection points at "check"). Do NOT rename it or split it
+  # into a matrix — that renames the reported check and breaks protection. The extra compat lanes
+  # below are separate, non-required jobs.
   check:
     runs-on: ubuntu-latest
     steps:
@@ -20,3 +23,29 @@ jobs:
         run: uv run pytest
       - name: Build
         run: uv build
+
+  # Floor lane (non-required): lowest supported Python + oldest dependency versions the pyproject
+  # constraints allow (numpy 1.26 / scipy 1.11 / pandas 2.x / scikit-learn 1.4). Catches use of
+  # APIs newer than the declared floor — the default `check` lane runs current deps (pandas 3.x),
+  # so this is where a pandas-2-vs-3 back-compat break would surface.
+  floor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: { python-version: "3.11" }
+      - run: uv sync --extra dev --resolution lowest-direct
+      - name: Tests
+        run: uv run pytest
+
+  # Leading-edge lane (non-required): newest supported Python + newest dependency versions
+  # (pandas 3.x). Catches forward-compat breaks ahead of the required lane moving up.
+  leading-edge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: { python-version: "3.13" }
+      - run: uv sync --extra dev --upgrade
+      - name: Tests
+        run: uv run pytest
