@@ -14,6 +14,7 @@ import pytest
 
 from numeraire.core import capabilities
 from numeraire.core.data import CrossSectionView, TimeSeriesView
+from numeraire.core.engine import walk_forward_forecast
 from numeraire.testing import (
     _perturb_after,
     check_capabilities,
@@ -197,3 +198,73 @@ def test_capabilities_rejects_empty() -> None:
 
     with pytest.raises(AssertionError, match="at least one"):
         check_capabilities(_NoCap(), _ts_returns_only)
+
+
+# -- why check_no_lookahead does not probe to_forecast -------------------------
+#
+# The forecast-origin engine hands forecast() only a prefix-truncated view.window(origin), so a
+# forecast at origin d cannot see data after d — a future-perturbation probe could never fail
+# (dead code, now removed). A forecast leak instead surfaces where the vectorized paper protocol
+# and the prefix-truncated engine path disagree: the zoo's mandatory engine ≡ vectorized test.
+# This is that mechanism, demonstrated in-repo.
+
+
+def _leak_demo_view() -> TimeSeriesView:
+    # x_t is (mostly) the CONTEMPORANEOUS return r_t, so a same-index (leaked) regression fits well
+    # while the correct lagged regression x_t -> r_{t+1} has ~no signal (r is iid).
+    idx = pd.date_range("2000-01-31", periods=60, freq="ME")
+    rng = np.random.default_rng(99)
+    r = rng.normal(0.01, 0.04, 60)
+    x = r + rng.normal(0.0, 0.004, 60)
+    ret = pd.DataFrame({"mkt": r}, index=idx)
+    feat = pd.DataFrame({"x": x}, index=idx)
+    return TimeSeriesView(ret, feat, horizon=1)
+
+
+class _LagOLSModel:
+    def capabilities(self) -> set[str]:
+        return {capabilities.TO_FORECAST}
+
+    def forecast(self, view: TimeSeriesView) -> pd.Series:
+        _d, x, y = view.aligned()  # X_t paired with the return over (t, t+1] — PIT
+        xi = np.column_stack([np.ones(len(x)), x])
+        beta, *_ = np.linalg.lstsq(xi, y, rcond=None)
+        x_edge = view.features_asof(view.calendar[-1])  # feature at the origin
+        pred = float(np.concatenate([[1.0], x_edge]) @ beta.ravel())
+        return pd.Series([pred], index=view.assets)
+
+
+class _LagOLS:
+    def fit(self, view: TimeSeriesView) -> _LagOLSModel:
+        _ = view
+        return _LagOLSModel()
+
+
+def _vectorized_forecast(view: TimeSeriesView, *, leak: bool) -> pd.Series:
+    """Same predictive OLS as a one-pass full-sample loop; ``leak`` = contemporaneous pairing."""
+    idx = view.calendar
+    r = view.returns_frame().to_numpy(np.float64)[:, 0]
+    x = view.features_frame().to_numpy(np.float64)[:, 0]
+    n = len(r)
+    vals: dict[pd.Timestamp, float] = {}
+    for j in range(2, n - 1):  # origin j predicts r[j+1]
+        if leak:
+            xu, yu = x[: j + 1], r[: j + 1]  # x_u paired with the CONTEMPORANEOUS r_u (off-by-one)
+        else:
+            xu, yu = x[:j], r[1 : j + 1]  # x_u paired with r_{u+1} (correct)
+        xi = np.column_stack([np.ones(len(xu)), xu])
+        beta, *_ = np.linalg.lstsq(xi, yu, rcond=None)
+        vals[idx[j]] = float(beta[0] + beta[1] * x[j])
+    return pd.Series(vals)
+
+
+def test_forecast_leak_caught_by_engine_equals_vectorized() -> None:
+    view = _leak_demo_view()
+    eng = walk_forward_forecast(_LagOLS(), view, min_train=24, method="lagols")
+    engine = eng.forecasts["mkt"]
+    # the correct vectorized path reproduces the engine path (the equivalence test PASSES)
+    vec_ok = _vectorized_forecast(view, leak=False).reindex(engine.index)
+    np.testing.assert_allclose(engine.to_numpy(), vec_ok.to_numpy(), rtol=1e-9, atol=1e-9)
+    # a contemporaneous-leak vectorized path does NOT (the equivalence test would FAIL -> caught)
+    vec_leak = _vectorized_forecast(view, leak=True).reindex(engine.index)
+    assert not np.allclose(engine.to_numpy(), vec_leak.to_numpy(), atol=1e-6)

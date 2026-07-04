@@ -25,9 +25,16 @@ equivalent view each call — synthetic data with a fixed seed):
   (wide) or a ``[date, asset]`` MultiIndex (panel); a forecast is a ``pd.Series`` indexed by
   ``view.assets``.
 - :func:`check_determinism` — same estimator + same view ⇒ identical output, twice.
-- :func:`check_no_lookahead` — the property test. Fit on ``view.window(t)``; the outputs on the
-  calendar up to ``t`` must be **invariant to mutating data strictly after ``t``**. A leaky
-  estimator that peeks past a prediction date fails here.
+- :func:`check_no_lookahead` — the property test **for ``to_weights``**. A weights model receives a
+  multi-date view and must window internally, so its weights up to ``t`` must be **invariant to
+  mutating data strictly after ``t``**; a model that peeks past a prediction date fails here.
+  ``to_forecast`` is deliberately **not** probed: the forecast-origin engine only ever hands
+  ``forecast()`` a **prefix-truncated** ``view.window(origin)``, so a forecast at origin ``d`` is
+  structurally incapable of seeing data after ``d`` — perturbing the future can't change it, so a
+  probe here can never fail (it would be dead code). That PIT guarantee is exercised where a leak
+  actually surfaces: the zoo's mandatory **engine ≡ vectorized** equality test, where a
+  contemporaneous / off-by-one forecast leak makes the hand-written full-sample path disagree with
+  the prefix-truncated engine path (see ``tests/test_testing.py`` for the mechanism).
 - :func:`check_engine_roundtrip` — the estimator runs through the matching walk-forward driver
   without error and an evaluator emits rows conforming to the result schema.
 
@@ -113,31 +120,27 @@ def _restrict_weights(w: pd.DataFrame | pd.Series, t: pd.Timestamp) -> pd.DataFr
     return w.loc[w.index <= t]
 
 
+def _assert_finite_present(arr: Any, msg: str) -> None:
+    """Guard the ``equal_nan=True`` comparisons: an all-non-finite pair would pass as 'equal'."""
+    assert arr.size > 0 and bool(np.isfinite(arr).any()), (
+        f"{msg}: output is entirely non-finite (all NaN/inf) — cannot certify (false-green guard)"
+    )
+
+
 def _assert_weights_equal_on_common(
     a: pd.DataFrame | pd.Series, b: pd.DataFrame | pd.Series, msg: str
 ) -> None:
     idx = a.index.intersection(b.index)
     assert len(idx) > 0, f"{msg}: no overlapping prediction dates to compare"
     if isinstance(a, pd.Series) and isinstance(b, pd.Series):
-        np.testing.assert_allclose(
-            a.loc[idx].to_numpy(np.float64),
-            b.loc[idx].to_numpy(np.float64),
-            rtol=1e-9,
-            atol=1e-12,
-            equal_nan=True,
-            err_msg=msg,
-        )
-        return
-    assert isinstance(a, pd.DataFrame) and isinstance(b, pd.DataFrame)
-    cols = a.columns.intersection(b.columns)
-    np.testing.assert_allclose(
-        a.loc[idx, cols].to_numpy(np.float64),
-        b.loc[idx, cols].to_numpy(np.float64),
-        rtol=1e-9,
-        atol=1e-12,
-        equal_nan=True,
-        err_msg=msg,
-    )
+        arr_a, arr_b = a.loc[idx].to_numpy(np.float64), b.loc[idx].to_numpy(np.float64)
+    else:
+        assert isinstance(a, pd.DataFrame) and isinstance(b, pd.DataFrame)
+        cols = a.columns.intersection(b.columns)
+        arr_a = a.loc[idx, cols].to_numpy(np.float64)
+        arr_b = b.loc[idx, cols].to_numpy(np.float64)
+    _assert_finite_present(arr_a, msg)
+    np.testing.assert_allclose(arr_a, arr_b, rtol=1e-9, atol=1e-12, equal_nan=True, err_msg=msg)
 
 
 def _perturb_after(view: Any, t: pd.Timestamp) -> Any:
@@ -231,9 +234,12 @@ def check_determinism(estimator: Any, view_factory: ViewFactory) -> None:
     if capabilities.TO_FORECAST in ext:
         v = view_factory()
         d = v.calendar[_origin_index(v)]
+        f1 = m1.forecast(v.window(d)).to_numpy(np.float64)
+        f2 = m2.forecast(v.window(d)).to_numpy(np.float64)
+        _assert_finite_present(f1, "forecast determinism")
         np.testing.assert_allclose(
-            m1.forecast(v.window(d)).to_numpy(np.float64),
-            m2.forecast(v.window(d)).to_numpy(np.float64),
+            f1,
+            f2,
             rtol=1e-9,
             atol=1e-12,
             equal_nan=True,
@@ -242,40 +248,32 @@ def check_determinism(estimator: Any, view_factory: ViewFactory) -> None:
 
 
 def check_no_lookahead(estimator: Any, view_factory: ViewFactory) -> None:
-    """Outputs up to ``t`` are invariant to mutating data strictly after ``t`` (no look-ahead)."""
+    """``to_weights`` outputs up to ``t`` are invariant to mutating data strictly after ``t``.
+
+    Only ``to_weights`` is probed. A weights model is handed a multi-date view and must window
+    internally, so a leak (using post-``t`` data for a ``<= t`` weight) shows up here as a changed
+    weight when the future is perturbed. ``to_forecast`` is **not** probed: the engine only ever
+    passes ``forecast()`` a prefix-truncated ``view.window(origin)``, so a forecast at origin
+    ``d <= t`` cannot see post-``t`` data and a perturbation probe could never fail — a forecast
+    leak instead surfaces in the zoo's engine ≡ vectorized equality test (module docstring).
+    """
+    model = _fit(estimator, view_factory())
+    if capabilities.TO_WEIGHTS not in _caps(model):
+        return  # forecast-only / pricing-only: forecast PIT is structural (see docstring)
     view = view_factory()
     cal = view.calendar
     assert len(cal) >= 8, "no-look-ahead check needs a view with >= 8 calendar dates"
     t = cal[_origin_index(view)]
-    if not _extractable(_caps(_fit(estimator, view.window(t)))):
-        return  # capability-only method: no weight/forecast surface to probe
     twin = _perturb_after(view, t)
-    if capabilities.TO_WEIGHTS in _CRYSTALLIZED and capabilities.TO_WEIGHTS in _caps(
-        _fit(estimator, view.window(t))
-    ):
-        # Extract over the FULL view (which contains data after t); a PIT-respecting model windows
-        # internally, so its weights at dates <= t must ignore the perturbed tail.
-        w_a = _weights(_fit(estimator, view.window(t)), view)
-        w_b = _weights(_fit(estimator, twin.window(t)), twin)
-        _assert_weights_equal_on_common(
-            _restrict_weights(w_a, t),
-            _restrict_weights(w_b, t),
-            "to_weights at dates <= t changed when only post-t data was mutated (look-ahead)",
-        )
-    if capabilities.TO_FORECAST in _caps(_fit(estimator, view.window(t))):
-        m_a = _fit(estimator, view.window(t))
-        m_b = _fit(estimator, twin.window(t))
-        k = _origin_index(view)
-        for j in range(max(1, k - 2), k + 1):
-            d = cal[j]
-            np.testing.assert_allclose(
-                m_a.forecast(view.window(d)).to_numpy(np.float64),
-                m_b.forecast(twin.window(d)).to_numpy(np.float64),
-                rtol=1e-9,
-                atol=1e-12,
-                equal_nan=True,
-                err_msg="forecast at origin <= t changed when only post-t data was mutated",
-            )
+    # Extract over the FULL view (which contains data after t); a PIT-respecting model windows
+    # internally, so its weights at dates <= t must ignore the perturbed tail.
+    w_a = _weights(_fit(estimator, view.window(t)), view)
+    w_b = _weights(_fit(estimator, twin.window(t)), twin)
+    _assert_weights_equal_on_common(
+        _restrict_weights(w_a, t),
+        _restrict_weights(w_b, t),
+        "to_weights at dates <= t changed when only post-t data was mutated (look-ahead)",
+    )
 
 
 def check_engine_roundtrip(
