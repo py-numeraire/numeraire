@@ -49,3 +49,15 @@ jobs:
       - run: uv sync --extra dev --upgrade
       - name: Tests
         run: uv run pytest
+
+  # Optional adapter lane (non-required): installs the heavy [skfolio] extra so the skfolio
+  # adapter tests actually run (they self-skip in the required lane, which omits the extra).
+  skfolio:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: { python-version: "3.12" }
+      - run: uv sync --extra dev --extra skfolio
+      - name: Adapter tests
+        run: uv run pytest tests/test_skfolio_adapter.py

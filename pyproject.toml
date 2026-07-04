@@ -32,6 +32,7 @@ dev = [
   "pre-commit>=3.7", "build>=1.2", "pandas-stubs>=2.0",
 ]
 docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.25"]
+skfolio = ["skfolio>=0.5"]
 
 # Methods bundled in the repo register themselves via entry points (open registry).
 # External packages (numeraire-yourlab, numeraire-<method>) register the same way.
