@@ -33,5 +33,5 @@ jobs:
       - name: Build
         run: uv build
       - name: Check distributions
-        run: uv run twine check dist/*
+        run: uvx twine check dist/*   # ephemeral twine; the publish job needs no dev toolchain
       - uses: pypa/gh-action-pypi-publish@release/v1
