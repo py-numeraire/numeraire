@@ -14,11 +14,11 @@
    GRSResult
    sharpe_diff_test
    SharpeDiffResult
-   clark_west
+   clark_west_test
    ClarkWestResult
    alpha_regression
    AlphaResult
-   adjust_tests
+   adjust_pvalues
    MultipleTestResult
    newey_west_lrv
    certainty_equivalent

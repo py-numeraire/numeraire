@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from numeraire import WalkForwardSplitter, walk_forward
+from numeraire import WalkForwardSplitter, backtest_weights
 from numeraire.core.data import TimeSeriesView
 from numeraire.core.schema import validate_result
 from numeraire.testing import check_estimator
@@ -83,7 +83,7 @@ def test_conformance_suite_passes() -> None:
 
 def test_engine_roundtrip_emits_valid_rows() -> None:
     view = _view(60, 4, seed=5)
-    out = walk_forward(
+    out = backtest_weights(
         SkfolioWeights(window=24),
         view,
         WalkForwardSplitter(min_train=24, test_size=1, expanding=True),

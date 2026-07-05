@@ -17,7 +17,7 @@ This module is core-adjacent infrastructure (it lives in ``numeraire`` proper, i
 ``numeraire.core`` + numpy/pandas, and is exempt from the boundary rule's method/adapter ban like
 :mod:`numeraire.testing`). ``compare`` is a single full-sample-fit, in-sample comparison (every row
 is tagged ``protocol="in_sample"``); for out-of-sample per-method scoring, run
-:func:`numeraire.core.engine.walk_forward_pricing` on each method directly. The signature is kept
+:func:`numeraire.core.engine.backtest_pricing` on each method directly. The signature is kept
 capability-generic (entries + a common test set + a list of evaluators); v1 implements the pricing
 capability.
 """

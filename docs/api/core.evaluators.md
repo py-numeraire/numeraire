@@ -15,7 +15,7 @@
    CEQEvaluator
    AlphaEvaluator
    StrategyReturnEvaluator
-   OOSR2Evaluator
+   OutOfSampleR2Evaluator
    SquaredErrorDiffEvaluator
    ClarkWestEvaluator
    CrossSectionalR2Evaluator

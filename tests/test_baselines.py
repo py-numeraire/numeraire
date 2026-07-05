@@ -20,7 +20,7 @@ from numeraire.baselines import (
     minimum_variance_weights,
 )
 from numeraire.core.data import TimeSeriesView
-from numeraire.core.engine import walk_forward, walk_forward_forecast
+from numeraire.core.engine import backtest_forecast, backtest_weights
 from numeraire.core.splitter import WalkForwardSplitter
 from numeraire.testing import check_estimator
 
@@ -109,7 +109,7 @@ def test_mean_variance_rejects_bad_normalization() -> None:
 
 def test_equal_weight_engine_roundtrip() -> None:
     view = _view(seed=5)
-    out = walk_forward(
+    out = backtest_weights(
         EqualWeight(),
         view,
         WalkForwardSplitter(min_train=24, test_size=1, expanding=True),
@@ -130,7 +130,7 @@ def test_min_variance_engine_equals_vectorized() -> None:
         cal[i]: minimum_variance_weights(np.cov(r[i - win + 1 : i + 1], rowvar=False))
         for i in range(win - 1, len(cal))
     }
-    out = walk_forward(
+    out = backtest_weights(
         MinVariance(window=win),
         view,
         WalkForwardSplitter(min_train=win, test_size=1, expanding=True),
@@ -144,7 +144,7 @@ def test_min_variance_engine_equals_vectorized() -> None:
 def test_historical_mean_is_the_engine_benchmark() -> None:
     # HistoricalMean's forecast IS the engine's prevailing-mean benchmark, so they coincide exactly.
     view = _view(n_assets=1, seed=7)
-    out = walk_forward_forecast(HistoricalMean(), view, min_train=24, method="hm")
+    out = backtest_forecast(HistoricalMean(), view, min_train=24, method="hm")
     assert not out.forecasts.empty
     np.testing.assert_allclose(out.forecasts.to_numpy(), out.benchmark.to_numpy(), atol=1e-12)
 
@@ -172,7 +172,7 @@ def test_constructor_and_input_guards() -> None:
 def test_mean_variance_none_normalization_engine() -> None:
     # the raw (unnormalized) direction runs through the engine and its weights need not sum to one
     view = _view(n=80, seed=8)
-    out = walk_forward(
+    out = backtest_weights(
         MeanVariance(normalization="none", window=36),
         view,
         WalkForwardSplitter(min_train=36, test_size=1, expanding=True),

@@ -131,7 +131,7 @@ class MeanReturnEvaluator:
         return _frame([_row(oos_output, "mean_return", mean, s.index[-1])])
 
 
-class OOSR2Evaluator:
+class OutOfSampleR2Evaluator:
     """Out-of-sample R^2 of a forecast vs a benchmark, ``1 - SSE_model / SSE_benchmark`` (percent).
 
     Pooled across all origins and assets; positive => the model beats the benchmark OOS.
@@ -155,7 +155,7 @@ class OOSR2Evaluator:
 
     def evaluate(self, oos_output: object) -> pd.DataFrame:
         if not isinstance(oos_output, ForecastOutput):
-            raise TypeError("OOSR2Evaluator requires a ForecastOutput")
+            raise TypeError("OutOfSampleR2Evaluator requires a ForecastOutput")
         r = oos_output.realized.to_numpy(dtype=np.float64)
         f = oos_output.forecasts.to_numpy(dtype=np.float64)
         if self.benchmark == "zero":
@@ -167,6 +167,23 @@ class OOSR2Evaluator:
         r2 = float("nan") if sse_bench == 0.0 else (1.0 - sse_model / sse_bench) * 100.0
         date = oos_output.forecasts.index[-1]
         return _frame([_row(oos_output, "oos_r2_pct", r2, date)])
+
+
+class OOSR2Evaluator(OutOfSampleR2Evaluator):
+    """Deprecated alias for :class:`OutOfSampleR2Evaluator` (kept for one release).
+
+    Constructing it warns; behaviour is identical (subclass). The registry key ``"oos_r2"`` and the
+    ``oos_r2_pct`` metric string are unchanged, so registered lookups are unaffected.
+    """
+
+    def __init__(self, benchmark: str = "historical") -> None:
+        warnings.warn(
+            "OOSR2Evaluator is deprecated and will be removed in a future release; "
+            "use OutOfSampleR2Evaluator instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(benchmark)
 
 
 class StrategyReturnEvaluator:
@@ -243,7 +260,7 @@ class SquaredErrorDiffEvaluator:
 
     ``value_t = sum_assets[(r-b)^2 - (r-f)^2]`` at origin ``t``; its cumulative sum is the
     CDSPE curve (positive & rising ⇒ the model beats the prevailing mean over time). The
-    time-series companion to the scalar :class:`OOSR2Evaluator`.
+    time-series companion to the scalar :class:`OutOfSampleR2Evaluator`.
     """
 
     requires: ClassVar[set[str]] = {capabilities.TO_FORECAST}
@@ -263,9 +280,9 @@ class SquaredErrorDiffEvaluator:
 class ClarkWestEvaluator:
     """Clark-West (2007) MSPE-adjusted test of the forecast against its nested benchmark.
 
-    The right significance test to pair with :class:`OOSR2Evaluator` — plain Diebold-Mariano is
-    undersized against a nested benchmark (the historical mean). Multi-asset outputs aggregate the
-    per-origin adjusted loss difference across assets (the pooled companion of
+    The right significance test to pair with :class:`OutOfSampleR2Evaluator` — plain
+    Diebold-Mariano is undersized against a nested benchmark (the historical mean). Multi-asset
+    outputs aggregate the per-origin adjusted loss difference across assets (the pooled companion of
     :class:`SquaredErrorDiffEvaluator`); one asset is the textbook statistic. Emits two rows:
     ``cw_t`` and ``cw_p`` (one-sided). Use ``nw_lags = horizon - 1`` for multi-step forecasts.
     """
@@ -606,7 +623,7 @@ register_evaluator("sharpe", SharpeEvaluator(), overwrite=True)
 register_evaluator("ceq", CEQEvaluator(), overwrite=True)
 register_evaluator("mean_return", MeanReturnEvaluator(), overwrite=True)
 register_evaluator("strategy_return", StrategyReturnEvaluator(), overwrite=True)
-register_evaluator("oos_r2", OOSR2Evaluator(), overwrite=True)
+register_evaluator("oos_r2", OutOfSampleR2Evaluator(), overwrite=True)
 register_evaluator("sed", SquaredErrorDiffEvaluator(), overwrite=True)
 register_evaluator("clark_west", ClarkWestEvaluator(), overwrite=True)
 register_evaluator("xs_r2", CrossSectionalR2Evaluator(), overwrite=True)

@@ -14,8 +14,8 @@ import pytest
 from numeraire import (
     TimeSeriesView,
     WalkForwardSplitter,
+    backtest_forecast,
     validation_split,
-    walk_forward_forecast,
 )
 from numeraire.core import capabilities
 from numeraire.core.data import CrossSectionView
@@ -57,8 +57,8 @@ class _CountingEstimator:
 
 def test_refit_every_one_is_the_default_path() -> None:
     v = _tsv()
-    a = walk_forward_forecast(_CountingEstimator(), v, min_train=20, method="hm")
-    b = walk_forward_forecast(_CountingEstimator(), v, min_train=20, refit_every=1, method="hm")
+    a = backtest_forecast(_CountingEstimator(), v, min_train=20, method="hm")
+    b = backtest_forecast(_CountingEstimator(), v, min_train=20, refit_every=1, method="hm")
     pd.testing.assert_frame_equal(a.forecasts, b.forecasts)
     pd.testing.assert_frame_equal(a.benchmark, b.benchmark)
 
@@ -66,7 +66,7 @@ def test_refit_every_one_is_the_default_path() -> None:
 def test_refit_every_counts_fits_and_freezes_parameters() -> None:
     v = _tsv()
     est = _CountingEstimator()
-    out = walk_forward_forecast(est, v, min_train=20, refit_every=12, method="hm")
+    out = backtest_forecast(est, v, min_train=20, refit_every=12, method="hm")
     n_origins = len(out.forecasts)
     assert est.n_fits == int(np.ceil(n_origins / 12))
     # within a refit block the forecast (frozen mean) is constant; it jumps only at refits
@@ -80,10 +80,10 @@ def test_refit_every_counts_fits_and_freezes_parameters() -> None:
 
 def test_refit_every_parallel_equals_serial() -> None:
     v = _tsv(seed=1)
-    a = walk_forward_forecast(
+    a = backtest_forecast(
         _CountingEstimator(), v, min_train=20, refit_every=6, method="hm", n_jobs=1
     )
-    b = walk_forward_forecast(
+    b = backtest_forecast(
         _CountingEstimator(), v, min_train=20, refit_every=6, method="hm", n_jobs=-1
     )
     pd.testing.assert_frame_equal(a.forecasts, b.forecasts)
@@ -92,7 +92,7 @@ def test_refit_every_parallel_equals_serial() -> None:
 
 def test_refit_every_validates() -> None:
     with pytest.raises(ValueError, match="refit_every"):
-        walk_forward_forecast(_CountingEstimator(), _tsv(), refit_every=0, method="hm")
+        backtest_forecast(_CountingEstimator(), _tsv(), refit_every=0, method="hm")
 
 
 def test_validation_split_partitions_the_fold_calendar() -> None:

@@ -15,8 +15,9 @@ The contract (why this stays leak-free):
   it is given*, so feeding it the test window would pour realized test returns into the position —
   a structural look-ahead. Weights come only from ``.weights_`` (a function of the fit window).
 
-Through ``walk_forward`` the estimator is re-fit at each origin on that origin's PIT window and the
-resulting weights are applied to the next period, so the broadcast is per-origin and point-in-time.
+Through ``backtest_weights`` the estimator is re-fit at each origin on that origin's PIT window and
+the resulting weights are applied to the next period, so the broadcast is per-origin and
+point-in-time.
 The optional ``window`` caps the lookback to the most recent ``window`` rows of whatever the engine
 hands ``fit`` (e.g. a rolling estimation window under an expanding split).
 

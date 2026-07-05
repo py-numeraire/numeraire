@@ -55,12 +55,16 @@ import pandas as pd
 from numeraire.core import capabilities
 from numeraire.core.data import CrossSectionView, TimeSeriesView
 from numeraire.core.engine import (
-    walk_forward,
-    walk_forward_forecast,
-    walk_forward_panel,
-    walk_forward_pricing,
+    backtest_forecast,
+    backtest_panel,
+    backtest_pricing,
+    backtest_weights,
 )
-from numeraire.core.evaluators import CrossSectionalR2Evaluator, OOSR2Evaluator, SharpeEvaluator
+from numeraire.core.evaluators import (
+    CrossSectionalR2Evaluator,
+    OutOfSampleR2Evaluator,
+    SharpeEvaluator,
+)
 from numeraire.core.schema import validate_result
 from numeraire.core.splitter import WalkForwardSplitter
 
@@ -327,9 +331,9 @@ def check_engine_roundtrip(
         sp = splitter or WalkForwardSplitter(
             min_train=warmup, test_size=max(1, n - warmup), expanding=True
         )
-        out = walk_forward(estimator, view, sp, method="conformance")
+        out = backtest_weights(estimator, view, sp, method="conformance")
         assert not out.weights.empty, (
-            "walk_forward produced no weights (widen the fixture/splitter)"
+            "backtest_weights produced no weights (widen the fixture/splitter)"
         )
         rows = SharpeEvaluator().evaluate(out)
         validate_result(rows)
@@ -338,28 +342,28 @@ def check_engine_roundtrip(
         sp = splitter or WalkForwardSplitter(
             min_train=warmup, test_size=max(1, n - warmup), expanding=True
         )
-        out = walk_forward_panel(estimator, view, sp, method="conformance")
+        out = backtest_panel(estimator, view, sp, method="conformance")
         assert not out.weights.empty, (
-            "walk_forward_panel produced no weights (widen the fixture/splitter)"
+            "backtest_panel produced no weights (widen the fixture/splitter)"
         )
         rows = SharpeEvaluator().evaluate(out)
         validate_result(rows)
         assert len(rows) >= 1
     elif capabilities.TO_FORECAST in caps and isinstance(view, TimeSeriesView):
-        out = walk_forward_forecast(
+        out = backtest_forecast(
             estimator, view, min_train=warmup, method="conformance", **(forecast_kwargs or {})
         )
-        assert not out.forecasts.empty, "walk_forward_forecast produced no forecasts"
-        rows = OOSR2Evaluator().evaluate(out)
+        assert not out.forecasts.empty, "backtest_forecast produced no forecasts"
+        rows = OutOfSampleR2Evaluator().evaluate(out)
         validate_result(rows)
         assert len(rows) >= 1
     elif capabilities.TO_PRICING in caps and isinstance(view, TimeSeriesView | CrossSectionView):
         sp = splitter or WalkForwardSplitter(
             min_train=warmup, test_size=max(1, n - warmup), expanding=True
         )
-        out = walk_forward_pricing(estimator, view, sp, method="conformance")
+        out = backtest_pricing(estimator, view, sp, method="conformance")
         assert not out.predicted.empty, (
-            "walk_forward_pricing produced no predictions (widen the fixture/splitter)"
+            "backtest_pricing produced no predictions (widen the fixture/splitter)"
         )
         rows = CrossSectionalR2Evaluator().evaluate(out)
         validate_result(rows)

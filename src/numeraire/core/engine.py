@@ -9,13 +9,15 @@ is one tidy container carrying the preprocessing/vintage provenance every result
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
+import warnings
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, TypeVar
+from typing import Any, ParamSpec, TypeVar
 
 import numpy as np
 import pandas as pd
@@ -31,6 +33,27 @@ from numeraire.core.protocols import (
 
 _T = TypeVar("_T")
 _R = TypeVar("_R")
+_P = ParamSpec("_P")
+_RT = TypeVar("_RT")
+
+
+def _deprecated_alias(replacement: Callable[_P, _RT], *, old: str, new: str) -> Callable[_P, _RT]:
+    """Wrap ``replacement`` in a thin forwarder that emits a ``DeprecationWarning`` naming ``new``.
+
+    The old public name keeps working for one release (non-breaking rename); the warning tells
+    callers to migrate. Signature and return type are preserved for type-checkers via ``ParamSpec``.
+    """
+
+    @functools.wraps(replacement)
+    def _alias(*args: _P.args, **kwargs: _P.kwargs) -> _RT:
+        warnings.warn(
+            f"{old}() is deprecated and will be removed in a future release; use {new}() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return replacement(*args, **kwargs)
+
+    return _alias
 
 
 def config_hash(config: dict[str, Any] | None) -> str:
@@ -159,9 +182,9 @@ class PricingOutput:
     cross-section of expected returns for the return realized over ``(t, t+h]`` and
     ``realized.loc[t]`` is that realized return (``nan`` for an asset absent / not yet realized at
     ``t``). ``protocol`` records the discipline the panels were produced under — ``"walk_forward"``
-    (per-fold PIT refits, :func:`walk_forward_pricing`) or ``"in_sample"`` (one full-sample fit,
-    :func:`pricing_in_sample`) — and flows straight through to every result row so an explanatory
-    in-sample R^2 stays distinguishable from an out-of-sample one.
+    (per-fold PIT refits, :func:`backtest_pricing`) or ``"in_sample"`` (one full-sample fit,
+    :func:`backtest_pricing_in_sample`) — and flows straight through to every result row so an
+    explanatory in-sample R^2 stays distinguishable from an out-of-sample one.
     """
 
     predicted: pd.DataFrame
@@ -181,7 +204,7 @@ class PricingOutput:
         return cols[0] if len(cols) == 1 else f"n={len(cols)}"
 
 
-def walk_forward_forecast(
+def backtest_forecast(
     estimator: Estimator,
     view: TimeSeriesView,
     *,
@@ -276,7 +299,7 @@ def _stack(rows: list[Float], n_cols: int) -> Float:
     return np.vstack(rows)
 
 
-def walk_forward(
+def backtest_weights(
     estimator: Estimator,
     view: TimeSeriesView,
     splitter: Any,
@@ -402,7 +425,7 @@ def _as_weight_series(w: pd.Series | pd.DataFrame) -> pd.Series:
     return w
 
 
-def walk_forward_panel(
+def backtest_panel(
     estimator: Estimator,
     view: CrossSectionView,
     splitter: Any,
@@ -415,11 +438,12 @@ def walk_forward_panel(
 ) -> PanelWeightsOutput:
     """Walk-forward OOS backtest of a cross-sectional ``to_weights`` estimator over a ragged panel.
 
-    Mirrors :func:`walk_forward` but for :class:`~numeraire.core.data.CrossSectionView`: the fitted
-    model returns long ``(date, asset)`` weights, realized forward returns are aligned by key (so an
-    entering/exiting universe is handled), and any name whose horizon is unrealized in-view (or that
-    delists first) is dropped before scoring. The time-series engine is left untouched. ``n_jobs``
-    fans the folds over a thread pool (``-1`` = all cores); order-preserving, so identical output.
+    Mirrors :func:`backtest_weights` but for :class:`~numeraire.core.data.CrossSectionView`: the
+    fitted model returns long ``(date, asset)`` weights, realized forward returns are aligned by key
+    (so an entering/exiting universe is handled), and any name whose horizon is unrealized in-view
+    (or that delists first) is dropped before scoring. The time-series engine is left untouched.
+    ``n_jobs`` fans the folds over a thread pool (``-1`` = all cores); order-preserving, so
+    identical output.
     """
     chash = config_hash(config)
     rid = run_id if run_id is not None else f"{method}-{chash}"
@@ -511,7 +535,7 @@ def _finalize_pricing(
     return predicted.iloc[keep], realized.iloc[keep]
 
 
-def walk_forward_pricing(
+def backtest_pricing(
     estimator: Estimator,
     view: Any,
     splitter: Any,
@@ -524,8 +548,8 @@ def walk_forward_pricing(
 ) -> PricingOutput:
     """Walk-forward OOS pricing of a ``to_pricing`` estimator: pooled predicted vs realized panels.
 
-    Mirrors :func:`walk_forward`: for each ``(train, test)`` fold the estimator is fit on the PIT
-    train window and its fitted model prices the test window via
+    Mirrors :func:`backtest_weights`: for each ``(train, test)`` fold the estimator is fit on the
+    PIT train window and its fitted model prices the test window via
     :meth:`~numeraire.core.protocols.SupportsPricing.expected_returns`; realized ``(t, t+h]``
     returns are pulled from the full ``view`` (never the model), and the per-fold cross-sections are
     pooled into one ``(date x asset)`` panel pair tagged ``protocol="walk_forward"``. Works on
@@ -571,7 +595,7 @@ def walk_forward_pricing(
     )
 
 
-def pricing_in_sample(
+def backtest_pricing_in_sample(
     estimator: Estimator,
     view: Any,
     *,
@@ -585,7 +609,7 @@ def pricing_in_sample(
     The paper cross-sectional-pricing tradition — a single fit on all of ``view`` (no walk-forward
     discipline) whose expected returns are scored against the same sample's realized returns, tagged
     ``protocol="in_sample"`` so the explanatory nature of the number is explicit in each result row.
-    Use :func:`walk_forward_pricing` for the out-of-sample counterpart.
+    Use :func:`backtest_pricing` for the out-of-sample counterpart.
     """
     chash = config_hash(config)
     rid = run_id if run_id is not None else f"{method}-{chash}"
@@ -608,3 +632,96 @@ def pricing_in_sample(
         run_id=rid,
         protocol="in_sample",
     )
+
+
+_DISPATCH_CAPS = (capabilities.TO_WEIGHTS, capabilities.TO_FORECAST, capabilities.TO_PRICING)
+
+
+def backtest(
+    estimator: Estimator,
+    view: Any,
+    splitter: Any = None,
+    *,
+    method: str,
+    in_sample: bool = False,
+    **kwargs: Any,
+) -> WeightsOutput | ForecastOutput | PricingOutput | PanelWeightsOutput:
+    """Backtest ``estimator`` over ``view``, dispatching to the right typed driver by capability.
+
+    The discoverable entry point over the typed drivers. It routes on two things:
+
+    - **which capability** the fitted model advertises — ``capabilities()`` intersected with
+      ``{to_weights, to_forecast, to_pricing}``;
+    - **the view type** — :class:`~numeraire.core.data.TimeSeriesView` vs
+      :class:`~numeraire.core.data.CrossSectionView`.
+
+    Dispatch rule (capability + view -> driver -> Output):
+
+    - ``to_weights`` + ``TimeSeriesView`` -> :func:`backtest_weights` -> ``WeightsOutput``
+    - ``to_weights`` + ``CrossSectionView`` -> :func:`backtest_panel` -> ``PanelWeightsOutput``
+    - ``to_forecast`` + ``TimeSeriesView`` -> :func:`backtest_forecast` -> ``ForecastOutput``
+    - ``to_pricing`` (either view) -> :func:`backtest_pricing` -> ``PricingOutput``
+    - ``to_pricing`` + ``in_sample=True`` -> :func:`backtest_pricing_in_sample` -> ``PricingOutput``
+
+    ``in_sample=True`` selects the single-full-sample-fit pricing path (explanatory in-sample R^2)
+    and requires a ``to_pricing`` model. Every other path is walk-forward.
+
+    To read the capabilities the model must first be fitted, so ``backtest`` does **one inspection
+    fit on the full ``view``** and then delegates to the driver (which re-fits per fold / on the
+    full sample as its discipline requires). The extra fit is intentional and cheap relative to a
+    full walk-forward; power users who want to skip it — or who need the precise return type — can
+    call the typed driver (``backtest_weights`` / ``backtest_forecast`` / ``backtest_panel`` /
+    ``backtest_pricing`` / ``backtest_pricing_in_sample``) directly.
+
+    A model advertising more than one of the three dispatchable capabilities is **ambiguous** and
+    raises ``TypeError`` — call the specific typed driver in that case. Extra keyword arguments
+    (``min_train``, ``window``, ``refit_every``, ``config``, ``data_vintage``, ``run_id``,
+    ``n_jobs``, ...) are forwarded to the selected driver.
+    """
+    model = estimator.fit(view)  # one inspection fit to read the model's capabilities
+    caps = set(model.capabilities()) & set(_DISPATCH_CAPS)
+
+    if in_sample:
+        if capabilities.TO_PRICING not in caps:
+            raise TypeError(
+                f"{method}: in_sample=True selects the in-sample pricing path, but the fitted "
+                "model does not support 'to_pricing'"
+            )
+        return backtest_pricing_in_sample(estimator, view, method=method, **kwargs)
+
+    if not caps:
+        raise TypeError(
+            f"{method}: fitted model advertises none of the dispatchable capabilities "
+            f"{list(_DISPATCH_CAPS)}; nothing to backtest"
+        )
+    if len(caps) > 1:
+        raise TypeError(
+            f"{method}: fitted model advertises multiple dispatchable capabilities "
+            f"{sorted(caps)}; backtest() cannot pick one — call the explicit typed driver "
+            "(backtest_weights / backtest_forecast / backtest_panel / backtest_pricing)"
+        )
+    (cap,) = caps
+
+    if cap == capabilities.TO_WEIGHTS:
+        if isinstance(view, CrossSectionView):
+            return backtest_panel(estimator, view, splitter, method=method, **kwargs)
+        return backtest_weights(estimator, view, splitter, method=method, **kwargs)
+    if cap == capabilities.TO_FORECAST:
+        return backtest_forecast(estimator, view, method=method, **kwargs)
+    return backtest_pricing(estimator, view, splitter, method=method, **kwargs)
+
+
+# --- deprecated aliases (one release): old walk_forward* names forward to the backtest* drivers ---
+walk_forward = _deprecated_alias(backtest_weights, old="walk_forward", new="backtest_weights")
+walk_forward_forecast = _deprecated_alias(
+    backtest_forecast, old="walk_forward_forecast", new="backtest_forecast"
+)
+walk_forward_panel = _deprecated_alias(
+    backtest_panel, old="walk_forward_panel", new="backtest_panel"
+)
+walk_forward_pricing = _deprecated_alias(
+    backtest_pricing, old="walk_forward_pricing", new="backtest_pricing"
+)
+pricing_in_sample = _deprecated_alias(
+    backtest_pricing_in_sample, old="pricing_in_sample", new="backtest_pricing_in_sample"
+)

@@ -14,7 +14,7 @@ import pytest
 
 from numeraire.core import capabilities
 from numeraire.core.data import CrossSectionView, TimeSeriesView
-from numeraire.core.engine import walk_forward_forecast
+from numeraire.core.engine import backtest_forecast
 from numeraire.testing import (
     _perturb_after,
     check_capabilities,
@@ -294,7 +294,7 @@ def _vectorized_forecast(view: TimeSeriesView, *, leak: bool) -> pd.Series:
 
 def test_forecast_leak_caught_by_engine_equals_vectorized() -> None:
     view = _leak_demo_view()
-    eng = walk_forward_forecast(_LagOLS(), view, min_train=24, method="lagols")
+    eng = backtest_forecast(_LagOLS(), view, min_train=24, method="lagols")
     engine = eng.forecasts["mkt"]
     # the correct vectorized path reproduces the engine path (the equivalence test PASSES)
     vec_ok = _vectorized_forecast(view, leak=False).reindex(engine.index)

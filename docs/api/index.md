@@ -29,7 +29,7 @@ adapters.skfolio
 ## Top-level namespace
 
 The most common classes and functions are re-exported at the top level, so
-`from numeraire import TimeSeriesView, walk_forward, SharpeEvaluator` works directly.
+`from numeraire import TimeSeriesView, backtest, SharpeEvaluator` works directly.
 
 ```{eval-rst}
 .. currentmodule:: numeraire
@@ -42,11 +42,12 @@ The most common classes and functions are re-exported at the top level, so
    CrossSectionView
    WalkForwardSplitter
    validation_split
-   walk_forward
-   walk_forward_panel
-   walk_forward_forecast
-   walk_forward_pricing
-   pricing_in_sample
+   backtest
+   backtest_weights
+   backtest_panel
+   backtest_forecast
+   backtest_pricing
+   backtest_pricing_in_sample
    config_hash
    WeightsOutput
    PanelWeightsOutput
@@ -57,7 +58,7 @@ The most common classes and functions are re-exported at the top level, so
    CEQEvaluator
    AlphaEvaluator
    StrategyReturnEvaluator
-   OOSR2Evaluator
+   OutOfSampleR2Evaluator
    SquaredErrorDiffEvaluator
    ClarkWestEvaluator
    CrossSectionalR2Evaluator
@@ -77,13 +78,13 @@ The most common classes and functions are re-exported at the top level, so
    simulate_weights
    RebalanceSchedule
    SimulationResult
-   make_sorts
+   sort_portfolios
    SortResult
    grs_test
    sharpe_diff_test
-   clark_west
+   clark_west_test
    alpha_regression
-   adjust_tests
+   adjust_pvalues
    newey_west_lrv
    certainty_equivalent
    return_loss

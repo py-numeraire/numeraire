@@ -16,7 +16,7 @@ from numeraire import (
     ClarkWestEvaluator,
     WeightsOutput,
     alpha_regression,
-    clark_west,
+    clark_west_test,
     fama_macbeth,
     grs_test,
     newey_west_lrv,
@@ -114,17 +114,17 @@ def test_clark_west_power_and_degenerate_case() -> None:
     signal = rng.normal(0.0, 0.02, size=t_n)
     y = signal + rng.normal(0.0, 0.02, size=t_n)
     bench = np.zeros(t_n)  # nested restricted model
-    good = clark_west(y, 0.9 * signal, bench)
+    good = clark_west_test(y, 0.9 * signal, bench)
     assert good.t_stat > 1.645  # one-sided 5%
     assert good.mspe_model < good.mspe_benchmark
-    degenerate = clark_west(y, bench, bench)  # model == benchmark
+    degenerate = clark_west_test(y, bench, bench)  # model == benchmark
     assert np.isnan(degenerate.t_stat)
 
 
 def test_clark_west_matches_manual_computation() -> None:
     rng = np.random.default_rng(8)
     y, f, b = (rng.normal(size=50) for _ in range(3))
-    res = clark_west(y, f, b)
+    res = clark_west_test(y, f, b)
     adj = (y - b) ** 2 - ((y - f) ** 2 - (b - f) ** 2)
     se = np.sqrt(np.var(adj) / len(adj))
     np.testing.assert_allclose(res.t_stat, adj.mean() / se)
@@ -205,37 +205,37 @@ def test_adjust_tests_hlz_table4_worked_example() -> None:
     # Paper: Bonferroni rejects 3 (tests 4, 7, 8), BHY rejects 6 (tests 2, 4, 6, 7, 8, 9).
     from scipy.stats import norm as _norm
 
-    from numeraire import adjust_tests
+    from numeraire import adjust_pvalues
 
     t = np.array([1.99, 2.63, 2.21, 3.43, 2.17, 2.64, 4.56, 5.34, 2.75, 2.49])
     p = 2.0 * _norm.sf(t)
-    bonf = adjust_tests(p, method="bonferroni", alpha=0.05)
+    bonf = adjust_pvalues(p, method="bonferroni", alpha=0.05)
     assert set(np.flatnonzero(bonf.rejected)) == {3, 6, 7}  # tests 4, 7, 8 (0-based)
-    bhy = adjust_tests(p, method="bhy", alpha=0.05)
+    bhy = adjust_pvalues(p, method="bhy", alpha=0.05)
     assert set(np.flatnonzero(bhy.rejected)) == {1, 3, 5, 6, 7, 8}  # tests 2, 4, 6, 7, 8, 9
     # Holm: the paper reports 4 rejections from its rounded display p-values; on exact normal
     # p-values the k=5 comparison sits 4e-5 INSIDE the threshold (p=0.008291 <= 0.05/6), so the
     # exact step-down continues through k=6. Assert the exact-arithmetic outcome and the
     # containment invariants rather than the display-rounded count.
-    holm = adjust_tests(p, method="holm", alpha=0.05)
+    holm = adjust_pvalues(p, method="holm", alpha=0.05)
     assert set(np.flatnonzero(holm.rejected)) == {1, 3, 5, 6, 7, 8}
     assert set(np.flatnonzero(bonf.rejected)) <= set(np.flatnonzero(holm.rejected))
     assert set(np.flatnonzero(holm.rejected)) <= set(np.flatnonzero(bhy.rejected))
 
 
 def test_adjust_tests_mechanics_with_robust_margins() -> None:
-    from numeraire import adjust_tests
+    from numeraire import adjust_pvalues
 
     p = np.array([0.001, 0.011, 0.02, 0.8])
     # Bonferroni (M=4): thresholds p <= 0.0125 -> rejects 0 and 1
-    assert list(adjust_tests(p, method="bonferroni", alpha=0.05).rejected) == [
+    assert list(adjust_pvalues(p, method="bonferroni", alpha=0.05).rejected) == [
         True,
         True,
         False,
         False,
     ]
     # Holm: k=1 vs 0.0125 ok, k=2 vs 0.05/3=0.0167 ok, k=3 vs 0.025 ok, k=4 vs 0.05 stops
-    assert list(adjust_tests(p, method="holm", alpha=0.05).rejected) == [
+    assert list(adjust_pvalues(p, method="holm", alpha=0.05).rejected) == [
         True,
         True,
         True,
@@ -243,7 +243,7 @@ def test_adjust_tests_mechanics_with_robust_margins() -> None:
     ]
     # adjusted-p monotonicity: sorted adjusted values are non-decreasing for every method
     for method in ("bonferroni", "holm", "bhy"):
-        adj = adjust_tests(p, method=method, alpha=0.05).adjusted_p
+        adj = adjust_pvalues(p, method=method, alpha=0.05).adjusted_p
         assert (np.diff(np.sort(adj)) >= -1e-15).all()
         assert (adj >= p - 1e-15).all()  # adjustment never makes a test easier
 
@@ -318,11 +318,11 @@ def test_fama_macbeth_raises_without_enough_cross_sections() -> None:
 
 
 def test_adjust_tests_guards() -> None:
-    from numeraire import adjust_tests
+    from numeraire import adjust_pvalues
 
     with pytest.raises(ValueError, match="method"):
-        adjust_tests(np.array([0.01]), method="fdr")
+        adjust_pvalues(np.array([0.01]), method="fdr")
     with pytest.raises(ValueError, match="alpha"):
-        adjust_tests(np.array([0.01]), alpha=1.5)
+        adjust_pvalues(np.array([0.01]), alpha=1.5)
     with pytest.raises(ValueError, match="p_values"):
-        adjust_tests(np.array([0.5, 1.2]))
+        adjust_pvalues(np.array([0.5, 1.2]))

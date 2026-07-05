@@ -13,10 +13,36 @@ holding period by the position formed from ``signal.loc[t]`` (the engine / calle
 
 from __future__ import annotations
 
+import functools
+import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import ParamSpec, TypeVar
 
 import numpy as np
 import pandas as pd
+
+_P = ParamSpec("_P")
+_RT = TypeVar("_RT")
+
+
+def _deprecated_alias(replacement: Callable[_P, _RT], *, old: str, new: str) -> Callable[_P, _RT]:
+    """Thin forwarder to ``replacement`` that emits a ``DeprecationWarning`` naming ``new``.
+
+    Keeps a renamed public function working for one release (non-breaking). Signature and return
+    type are preserved for type-checkers via ``ParamSpec``.
+    """
+
+    @functools.wraps(replacement)
+    def _alias(*args: _P.args, **kwargs: _P.kwargs) -> _RT:
+        warnings.warn(
+            f"{old}() is deprecated and will be removed in a future release; use {new}() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return replacement(*args, **kwargs)
+
+    return _alias
 
 
 @dataclass(frozen=True)
@@ -28,7 +54,7 @@ class SortResult:
     counts: pd.DataFrame  # (date x n_bins) number of assets in each bin
 
 
-def make_sorts(
+def sort_portfolios(
     signal: pd.DataFrame,
     returns: pd.DataFrame,
     *,
@@ -99,3 +125,7 @@ def make_sorts(
         long_short=pd.Series(ls, index=dates, name="long_short"),
         counts=pd.DataFrame(cnts, index=dates, columns=cols),
     )
+
+
+# --- deprecated alias (one release) ---
+make_sorts = _deprecated_alias(sort_portfolios, old="make_sorts", new="sort_portfolios")
