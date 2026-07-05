@@ -97,21 +97,36 @@ class MeanReturnEvaluator:
 
 
 class OOSR2Evaluator:
-    """Goyal-Welch (2008) out-of-sample R^2 of a forecast vs the historical-mean benchmark.
+    """Out-of-sample R^2 of a forecast vs a benchmark, ``1 - SSE_model / SSE_benchmark`` (percent).
 
-    ``R^2_oos = 1 - SSE_model / SSE_benchmark``, pooled across all origins and assets, reported
-    in percent. Positive => the model beats the prevailing mean OOS. This is the *right* metric
-    for predictive-regression methods — e.g. 1/A's published dp Table 3.
+    Pooled across all origins and assets; positive => the model beats the benchmark OOS.
+
+    ``benchmark`` selects the yardstick:
+
+    - ``"historical"`` (default) — the prevailing-mean benchmark carried in the output
+      (Goyal-Welch 2008): the *right* metric for predictive-regression methods (e.g. 1/A's dp).
+    - ``"zero"`` — a zero forecast, ``SSE_benchmark = sum r^2``. This is the Gu-Kelly-Xiu (2020)
+      convention for the machine-learning cross-section (return predictability is measured against
+      "no signal", not against a fitted mean), and it materially changes the number.
     """
 
     requires: ClassVar[set[str]] = {capabilities.TO_FORECAST}
+    _BENCHMARKS: ClassVar[tuple[str, ...]] = ("historical", "zero")
+
+    def __init__(self, benchmark: str = "historical") -> None:
+        if benchmark not in self._BENCHMARKS:
+            raise ValueError(f"benchmark must be one of {self._BENCHMARKS}; got {benchmark!r}")
+        self.benchmark = benchmark
 
     def evaluate(self, oos_output: object) -> pd.DataFrame:
         if not isinstance(oos_output, ForecastOutput):
             raise TypeError("OOSR2Evaluator requires a ForecastOutput")
         r = oos_output.realized.to_numpy(dtype=np.float64)
         f = oos_output.forecasts.to_numpy(dtype=np.float64)
-        b = oos_output.benchmark.to_numpy(dtype=np.float64)
+        if self.benchmark == "zero":
+            b = np.zeros_like(r)
+        else:
+            b = oos_output.benchmark.to_numpy(dtype=np.float64)
         sse_model = float(np.nansum((r - f) ** 2))
         sse_bench = float(np.nansum((r - b) ** 2))
         r2 = float("nan") if sse_bench == 0.0 else (1.0 - sse_model / sse_bench) * 100.0
