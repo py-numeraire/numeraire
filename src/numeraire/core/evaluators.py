@@ -13,7 +13,7 @@ from typing import ClassVar, Protocol
 
 import numpy as np
 import pandas as pd
-from scipy.stats import norm
+from scipy.stats import norm, spearmanr
 
 from numeraire.core import capabilities
 from numeraire.core.engine import (
@@ -66,6 +66,29 @@ def _row(out: _HasProvenance, metric: str, value: float, date: object) -> dict[s
 def _frame(rows: list[dict[str, object]]) -> pd.DataFrame:
     """Assemble result rows into a DataFrame with the canonical column order."""
     return pd.DataFrame(rows, columns=list(RESULT_COLUMNS))
+
+
+def _dated_weights(
+    out: WeightsOutput | PanelWeightsOutput,
+) -> list[tuple[object, dict[str, float]]]:
+    """Per-date ``{asset: weight}`` maps in calendar order (non-finite weights coerced to zero).
+
+    Normalizes both the wide :class:`WeightsOutput` (a ``date x asset`` frame) and the long
+    :class:`PanelWeightsOutput` (a ``(date, asset)`` Series over a ragged universe) to the same
+    per-date mapping, so exposure diagnostics align turnover across an entering/exiting universe.
+    """
+    dated: list[tuple[object, dict[str, float]]] = []
+    if isinstance(out, WeightsOutput):
+        assets = [str(c) for c in out.weights.columns]
+        mat = np.nan_to_num(out.weights.to_numpy(dtype=np.float64))
+        for i, t in enumerate(out.weights.index):
+            dated.append((t, {a: float(v) for a, v in zip(assets, mat[i], strict=True)}))
+        return dated
+    for t, sub in out.weights.groupby(level="date"):
+        names = [str(a) for a in sub.index.get_level_values("asset")]
+        vals = np.nan_to_num(sub.to_numpy(dtype=np.float64))
+        dated.append((t, {a: float(v) for a, v in zip(names, vals, strict=True)}))
+    return dated
 
 
 class SharpeEvaluator:
@@ -166,6 +189,55 @@ class StrategyReturnEvaluator:
         return _frame(rows)
 
 
+class ExposureEvaluator:
+    """Per-date portfolio-construction diagnostics flattened into per-date result rows.
+
+    Emits **one scalar row per date per metric** (like :class:`StrategyReturnEvaluator`), never the
+    per-date x asset weight matrix — the tidy schema has no asset axis, and the weights heatmap
+    consumes the ``WeightsOutput`` object directly downstream, not this result table. For the weight
+    vector ``w_t`` on date ``t``:
+
+    - ``gross_leverage`` = ``sum_a |w_{t,a}|`` (leverage; 1.0 for a fully-invested long-only book);
+    - ``net_exposure``   = ``sum_a w_{t,a}`` (directional tilt; 0 for a dollar-neutral book);
+    - ``turnover``       = ``sum_a |w_{t,a} - w_{t-1,a}|`` (one-sided L1 rebalancing volume vs the
+      previous rebalance, asset-aligned over the union universe; the opening rebalance is measured
+      from an all-cash book, so the first date's turnover equals its gross leverage);
+    - ``hhi``            = ``sum_a w_{t,a}^2`` (Herfindahl-Hirschman concentration; ``1/N`` for an
+      equal-weight book of ``N`` names, 1.0 for a single-name bet).
+
+    Handles the wide :class:`WeightsOutput` and the long :class:`PanelWeightsOutput` (turnover is
+    aligned across an entering/exiting universe). Non-finite weights are treated as zero.
+    """
+
+    requires: ClassVar[set[str]] = {capabilities.TO_WEIGHTS}
+
+    def evaluate(self, oos_output: object) -> pd.DataFrame:
+        if not isinstance(oos_output, WeightsOutput | PanelWeightsOutput):
+            raise TypeError("ExposureEvaluator requires a WeightsOutput or PanelWeightsOutput")
+        dated = _dated_weights(oos_output)
+        rows: list[dict[str, object]] = []
+        prev: dict[str, float] | None = None
+        for t, cur in dated:
+            vals = np.array(list(cur.values()), dtype=np.float64)
+            gross = float(np.sum(np.abs(vals)))
+            net = float(np.sum(vals))
+            hhi = float(np.sum(vals**2))
+            if prev is None:
+                turnover = gross  # opening trade from an all-cash book
+            else:
+                keys = set(cur) | set(prev)
+                turnover = float(sum(abs(cur.get(k, 0.0) - prev.get(k, 0.0)) for k in keys))
+            for metric, val in (
+                ("gross_leverage", gross),
+                ("net_exposure", net),
+                ("turnover", turnover),
+                ("hhi", hhi),
+            ):
+                rows.append(_row(oos_output, metric, val, t))
+            prev = cur
+        return _frame(rows)
+
+
 class SquaredErrorDiffEvaluator:
     """Per-origin squared-error difference (benchmark minus model), one row **per date**.
 
@@ -216,6 +288,58 @@ class ClarkWestEvaluator:
         p = float(norm.sf(t_stat)) if np.isfinite(t_stat) else float("nan")
         date = oos_output.forecasts.index[-1]
         return _frame([_row(oos_output, "cw_t", t_stat, date), _row(oos_output, "cw_p", p, date)])
+
+
+class ICEvaluator:
+    """Information coefficient of a forecast: the per-period cross-sectional rank correlation.
+
+    For each origin ``t`` the (Spearman) rank correlation ``ic_t`` between the forecast
+    cross-section and the realized-return cross-section across assets (finite pairs with variation
+    only). Emits three summary rows dated at the last origin:
+
+    - ``ic``    = ``mean_t ic_t`` (the average information coefficient);
+    - ``ic_ir`` = ``mean_t ic_t / std_t ic_t`` (the IC information ratio — the signal consistency);
+    - ``ic_t``  = ``ic_ir * sqrt(n_periods)`` (the t-statistic of a non-zero mean IC).
+
+    This is the *rank* IC at the output's single horizon; an IC-decay-vs-horizon curve is assembled
+    by the caller running forecasts at several horizons (one :class:`ForecastOutput` has one
+    horizon) and stacking the ``ic`` rows. A single-asset forecast has no cross-section to rank, so
+    every ``ic_t`` is undefined and the metrics are ``nan``.
+    """
+
+    requires: ClassVar[set[str]] = {capabilities.TO_FORECAST}
+
+    def evaluate(self, oos_output: object) -> pd.DataFrame:
+        if not isinstance(oos_output, ForecastOutput):
+            raise TypeError("ICEvaluator requires a ForecastOutput")
+        f = oos_output.forecasts.to_numpy(dtype=np.float64)
+        r = oos_output.realized.to_numpy(dtype=np.float64)
+        ics: list[float] = []
+        for i in range(f.shape[0]):
+            m = np.isfinite(f[i]) & np.isfinite(r[i])
+            if int(m.sum()) < 2:
+                continue
+            fr, rr = f[i][m], r[i][m]
+            if np.ptp(fr) == 0.0 or np.ptp(rr) == 0.0:
+                continue  # a constant cross-section has no rank ordering
+            rho, _ = spearmanr(fr, rr)
+            if np.isfinite(rho):
+                ics.append(float(rho))
+        arr = np.asarray(ics, dtype=np.float64)
+        ic_mean = float(arr.mean()) if arr.size else float("nan")
+        if arr.size >= 2 and float(arr.std(ddof=1)) > 0.0:
+            ic_ir = float(arr.mean() / arr.std(ddof=1))
+            ic_t = ic_ir * float(np.sqrt(arr.size))
+        else:
+            ic_ir = ic_t = float("nan")
+        date = oos_output.forecasts.index[-1] if len(oos_output.forecasts.index) else pd.NaT
+        return _frame(
+            [
+                _row(oos_output, "ic", ic_mean, date),
+                _row(oos_output, "ic_ir", ic_ir, date),
+                _row(oos_output, "ic_t", ic_t, date),
+            ]
+        )
 
 
 class AlphaEvaluator:
@@ -269,6 +393,147 @@ class CEQEvaluator:
         s = oos_output.strategy_returns()
         ceq = certainty_equivalent(s.to_numpy(dtype=np.float64), self.gamma)
         return _frame([_row(oos_output, "ceq", ceq, s.index[-1])])
+
+
+class TreynorEvaluator:
+    """Treynor (1965) ratio: annualized mean excess return per unit of *systematic* (market) risk.
+
+    ``treynor = periods_per_year * mean(r_p) / beta_market`` — where :class:`SharpeEvaluator`
+    divides the reward by *total* volatility, Treynor divides by the CAPM market beta, rewarding a
+    book whose idiosyncratic risk is already diversified away. ``beta_market`` is the strategy's
+    loading on the market factor from a (HAC) time-series regression of its realized returns on
+    ``factors[[market]]`` (reusing :func:`~numeraire.core.stats.alpha_regression`); the mean is
+    taken over the same overlapping sample. ``factors`` mirrors :class:`AlphaEvaluator`; ``market``
+    names the systematic column (default: the first). Numerator and beta are in return units.
+    """
+
+    requires: ClassVar[set[str]] = {capabilities.TO_WEIGHTS}
+
+    def __init__(
+        self,
+        factors: pd.DataFrame,
+        *,
+        market: str | None = None,
+        nw_lags: int = 0,
+        periods_per_year: int = 12,
+    ) -> None:
+        self.factors = factors
+        self.market = market
+        self.nw_lags = nw_lags
+        self.periods_per_year = periods_per_year
+
+    def evaluate(self, oos_output: object) -> pd.DataFrame:
+        if not isinstance(oos_output, WeightsOutput | PanelWeightsOutput):
+            raise TypeError("TreynorEvaluator requires a WeightsOutput or PanelWeightsOutput")
+        s = oos_output.strategy_returns()
+        col = self.market if self.market is not None else str(self.factors.columns[0])
+        mkt = self.factors[[col]]
+        beta = float(alpha_regression(s, mkt, nw_lags=self.nw_lags).betas[0])
+        joined = pd.concat([s.rename("_p"), mkt], axis=1, join="inner").dropna()
+        mean_ex = float(joined["_p"].mean()) if len(joined) else float("nan")
+        treynor = float("nan") if beta == 0.0 else mean_ex * self.periods_per_year / beta
+        return _frame([_row(oos_output, "treynor", treynor, s.index[-1])])
+
+
+class InformationRatioEvaluator:
+    """Information ratio: annualized mean active return per unit of tracking error vs a benchmark.
+
+    ``active_t = r_p,t - r_b,t`` (inner-joined on dates); ``ir = sqrt(P) * mean(active) /
+    std(active, ddof=1)``, the tracking-error-scaled active-management skill measure (Grinold-Kahn).
+    ``benchmark`` is a per-period return series on the strategy's calendar (e.g. a benchmark
+    method's realized :meth:`~numeraire.core.engine.WeightsOutput.strategy_returns`). Same
+    annualization as :class:`SharpeEvaluator` (a ratio of a mean to a std, so ``sqrt(P)``).
+    """
+
+    requires: ClassVar[set[str]] = {capabilities.TO_WEIGHTS}
+
+    def __init__(self, benchmark: pd.Series, *, periods_per_year: int = 12) -> None:
+        self.benchmark = benchmark
+        self.periods_per_year = periods_per_year
+
+    def evaluate(self, oos_output: object) -> pd.DataFrame:
+        if not isinstance(oos_output, WeightsOutput | PanelWeightsOutput):
+            raise TypeError(
+                "InformationRatioEvaluator requires a WeightsOutput or PanelWeightsOutput"
+            )
+        s = oos_output.strategy_returns()
+        joined = pd.concat(
+            [s.rename("_p"), self.benchmark.rename("_b")], axis=1, join="inner"
+        ).dropna()
+        active = (joined["_p"] - joined["_b"]).to_numpy(dtype=np.float64)
+        ann = float(np.sqrt(self.periods_per_year))
+        if active.size < 2 or float(np.std(active, ddof=1)) == 0.0:
+            ir = float("nan")
+        else:
+            ir = float(np.mean(active) / np.std(active, ddof=1)) * ann
+        return _frame([_row(oos_output, "information_ratio", ir, s.index[-1])])
+
+
+class M2Evaluator:
+    """Modigliani-Modigliani (1997) M-squared: the strategy's Sharpe expressed at benchmark risk.
+
+    The strategy levered/de-levered to the benchmark's volatility, reported in return units:
+    ``m2 = periods_per_year * (mean(r_p) / std(r_p)) * std(r_b)`` on the overlapping sample. Because
+    it equals ``annualized_Sharpe(r_p) * annualized_vol(r_b)``, it ranks portfolios identically to
+    the Sharpe ratio but on the intuitive scale of "what return would this earn at the benchmark's
+    risk". Computed in excess-return space (the risk-free add-back cancels), so ``m2 - mean(r_b)``
+    is the strategy's risk-adjusted outperformance of the benchmark. ``benchmark`` is a per-period
+    return series on the strategy's calendar.
+    """
+
+    requires: ClassVar[set[str]] = {capabilities.TO_WEIGHTS}
+
+    def __init__(self, benchmark: pd.Series, *, periods_per_year: int = 12) -> None:
+        self.benchmark = benchmark
+        self.periods_per_year = periods_per_year
+
+    def evaluate(self, oos_output: object) -> pd.DataFrame:
+        if not isinstance(oos_output, WeightsOutput | PanelWeightsOutput):
+            raise TypeError("M2Evaluator requires a WeightsOutput or PanelWeightsOutput")
+        s = oos_output.strategy_returns()
+        joined = pd.concat(
+            [s.rename("_p"), self.benchmark.rename("_b")], axis=1, join="inner"
+        ).dropna()
+        p = joined["_p"].to_numpy(dtype=np.float64)
+        b = joined["_b"].to_numpy(dtype=np.float64)
+        sd_p = float(np.std(p, ddof=1)) if p.size >= 2 else 0.0
+        if p.size < 2 or sd_p == 0.0:
+            m2 = float("nan")
+        else:
+            m2 = float(np.mean(p) / sd_p * np.std(b, ddof=1)) * self.periods_per_year
+        return _frame([_row(oos_output, "m2", m2, s.index[-1])])
+
+
+class SortinoEvaluator:
+    """Sortino ratio: annualized excess return over a MAR per unit of *downside* deviation.
+
+    ``sortino = sqrt(P) * (mean(r) - mar) / DD`` with the target downside deviation
+    ``DD = sqrt(mean(min(r - mar, 0)^2))`` (the full-sample denominator, so periods above the MAR
+    enter as zeros). Where :class:`SharpeEvaluator` penalizes *all* volatility, Sortino penalizes
+    only harmful shortfalls below the minimum acceptable return ``mar`` (per period, default 0).
+    NaNs are dropped; a series that never falls below the MAR has ``DD = 0`` and a ``nan`` ratio.
+    """
+
+    requires: ClassVar[set[str]] = {capabilities.TO_WEIGHTS}
+
+    def __init__(self, mar: float = 0.0, *, periods_per_year: int = 12) -> None:
+        self.mar = mar
+        self.periods_per_year = periods_per_year
+
+    def evaluate(self, oos_output: object) -> pd.DataFrame:
+        if not isinstance(oos_output, WeightsOutput | PanelWeightsOutput):
+            raise TypeError("SortinoEvaluator requires a WeightsOutput or PanelWeightsOutput")
+        s = oos_output.strategy_returns()
+        r = s.to_numpy(dtype=np.float64)
+        r = r[~np.isnan(r)]
+        ann = float(np.sqrt(self.periods_per_year))
+        downside = np.minimum(r - self.mar, 0.0)
+        dd = float(np.sqrt(np.mean(downside**2))) if r.size else float("nan")
+        if r.size < 2 or dd == 0.0:
+            sortino = float("nan")
+        else:
+            sortino = float((np.mean(r) - self.mar) / dd) * ann
+        return _frame([_row(oos_output, "sortino", sortino, s.index[-1])])
 
 
 def _pricing_means(out: PricingOutput) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -346,3 +611,9 @@ register_evaluator("sed", SquaredErrorDiffEvaluator(), overwrite=True)
 register_evaluator("clark_west", ClarkWestEvaluator(), overwrite=True)
 register_evaluator("xs_r2", CrossSectionalR2Evaluator(), overwrite=True)
 register_evaluator("avg_abs_alpha", AverageAbsAlphaEvaluator(), overwrite=True)
+register_evaluator("sortino", SortinoEvaluator(), overwrite=True)
+register_evaluator("ic", ICEvaluator(), overwrite=True)
+register_evaluator("exposure", ExposureEvaluator(), overwrite=True)
+# TreynorEvaluator / InformationRatioEvaluator / M2Evaluator take a factor frame or benchmark
+# series at construction (like AlphaEvaluator), so they are exported for direct use but not
+# registered with a default in the zero-argument open registry.
