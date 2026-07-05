@@ -43,7 +43,11 @@ dev = [
   "ruff>=0.6", "basedpyright>=1.18", "import-linter>=2.0",
   "pre-commit>=3.7", "build>=1.2", "pandas-stubs>=2.0", "twine>=5.0",
 ]
-docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.25"]
+docs = [
+  "sphinx>=7.3",
+  "pydata-sphinx-theme>=0.15",
+  "myst-parser>=3.0",
+]
 skfolio = ["skfolio>=0.5"]
 
 # Methods bundled in the repo register themselves via entry points (open registry).
@@ -61,6 +65,7 @@ HistoricalMean = "numeraire.baselines:HistoricalMean"
 
 [project.urls]
 Homepage = "https://github.com/py-numeraire/numeraire"
+Documentation = "https://py-numeraire.github.io/numeraire/"
 Repository = "https://github.com/py-numeraire/numeraire"
 Issues = "https://github.com/py-numeraire/numeraire/issues"
 Changelog = "https://github.com/py-numeraire/numeraire/blob/main/CHANGELOG.md"
