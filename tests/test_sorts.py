@@ -55,9 +55,7 @@ def test_nyse_breakpoints_shift_cutoffs() -> None:
     cols = ["nyse", "s1", "s2", "s3", "s4"]
     signal = _wide({c: [v] for c, v in zip(cols, [100.0, 1.0, 2.0, 3.0, 4.0], strict=True)}, dates)
     returns = _wide({c: [0.0] for c in cols}, dates)
-    universe = _wide(
-        {c: [c == "nyse"] for c in cols}, dates
-    )  # only 'nyse' defines the breakpoints
+    universe = _wide({c: [c == "nyse"] for c in cols}, dates)  # only 'nyse' defines the breakpoints
     res = make_sorts(signal, returns, n_bins=2, breakpoint_universe=universe)
     # with the cutoff at ~100, the 4 small names are all in the low bin, nyse alone in the high bin
     assert list(res.counts.loc[dates[0]]) == [4, 1]
