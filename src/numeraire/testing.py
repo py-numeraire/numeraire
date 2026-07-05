@@ -19,15 +19,16 @@ equivalent view each call — synthetic data with a fixed seed):
 
 - :func:`check_capabilities` — ``fit`` returns a ``Model`` whose ``capabilities()`` intersect the
   core set ``{to_weights, to_forecast, to_pricing}``, and every *crystallized* capability it
-  declares has its method (``to_weights`` / ``forecast``). ``to_pricing`` has no frozen method
-  surface yet (it crystallizes with the pricing rule-of-three), so no method name is enforced there.
+  declares has its method (``to_weights`` / ``forecast`` / ``expected_returns``).
 - :func:`check_output_shapes` — weights columns ⊆ ``view.assets`` and index ⊆ ``view.calendar``
   (wide) or a ``[date, asset]`` MultiIndex (panel); a forecast is a ``pd.Series`` indexed by
-  ``view.assets``.
+  ``view.assets``; pricing ``expected_returns`` is a ``(date x asset)`` frame with columns ⊆
+  ``view.assets`` and index ⊆ ``view.calendar``.
 - :func:`check_determinism` — same estimator + same view ⇒ identical output, twice.
-- :func:`check_no_lookahead` — the property test **for ``to_weights``**. A weights model receives a
-  multi-date view and must window internally, so its weights up to ``t`` must be **invariant to
-  mutating data strictly after ``t``**; a model that peeks past a prediction date fails here.
+- :func:`check_no_lookahead` — the property test **for ``to_weights`` and ``expected_returns``**.
+  Both hand the model a multi-date view and require it to window internally, so its rows up to ``t``
+  must be **invariant to mutating data strictly after ``t``**; a model that peeks past a prediction
+  date fails here (one leak channel, shared by a weight stream and a priced cross-section).
   ``to_forecast`` is deliberately **not** probed: the forecast-origin engine only ever hands
   ``forecast()`` a **prefix-truncated** ``view.window(origin)``, so a forecast at origin ``d`` is
   structurally incapable of seeing data after ``d`` — perturbing the future can't change it, so a
@@ -38,9 +39,9 @@ equivalent view each call — synthetic data with a fixed seed):
 - :func:`check_engine_roundtrip` — the estimator runs through the matching walk-forward driver
   without error and an evaluator emits rows conforming to the result schema.
 
-Capability-only methods (``to_pricing``, e.g. an IPCA adapter) exercise :func:`check_capabilities`
-and skip the weight/forecast-specific checks — that surface is not frozen, so the suite does not
-invent contracts for it.
+A pricing method (``to_pricing``, e.g. an IPCA adapter) now exercises the full suite: its
+``expected_returns`` surface is crystallized, so the shape, determinism, no-look-ahead, and
+engine-round-trip checks all apply to it exactly as they do to a weights method.
 """
 
 from __future__ import annotations
@@ -53,8 +54,13 @@ import pandas as pd
 
 from numeraire.core import capabilities
 from numeraire.core.data import CrossSectionView, TimeSeriesView
-from numeraire.core.engine import walk_forward, walk_forward_forecast, walk_forward_panel
-from numeraire.core.evaluators import OOSR2Evaluator, SharpeEvaluator
+from numeraire.core.engine import (
+    walk_forward,
+    walk_forward_forecast,
+    walk_forward_panel,
+    walk_forward_pricing,
+)
+from numeraire.core.evaluators import CrossSectionalR2Evaluator, OOSR2Evaluator, SharpeEvaluator
 from numeraire.core.schema import validate_result
 from numeraire.core.splitter import WalkForwardSplitter
 
@@ -73,6 +79,7 @@ ViewFactory = Callable[[], Any]
 _CRYSTALLIZED: dict[str, str] = {
     capabilities.TO_WEIGHTS: "to_weights",
     capabilities.TO_FORECAST: "forecast",
+    capabilities.TO_PRICING: "expected_returns",
 }
 _CORE_CAPS = frozenset({capabilities.TO_WEIGHTS, capabilities.TO_FORECAST, capabilities.TO_PRICING})
 
@@ -110,6 +117,12 @@ def _weights(model: Any, view: Any) -> pd.DataFrame | pd.Series:
     w = model.to_weights(view)
     assert isinstance(w, pd.DataFrame | pd.Series), "to_weights must return a DataFrame or Series"
     return w
+
+
+def _expected_returns(model: Any, view: Any) -> pd.DataFrame:
+    p = model.expected_returns(view)
+    assert isinstance(p, pd.DataFrame), "expected_returns must return a (date x asset) DataFrame"
+    return p
 
 
 def _restrict_weights(w: pd.DataFrame | pd.Series, t: pd.Timestamp) -> pd.DataFrame | pd.Series:
@@ -216,6 +229,10 @@ def check_output_shapes(estimator: Any, view_factory: ViewFactory) -> None:
         f = model.forecast(view.window(d))
         assert isinstance(f, pd.Series), "forecast must return a pd.Series"
         assert [str(i) for i in f.index] == view.assets, "forecast index must equal view.assets"
+    if capabilities.TO_PRICING in caps:
+        p = _expected_returns(model, view)
+        assert set(map(str, p.columns)) <= assets, "expected_returns columns must be ⊆ view.assets"
+        assert set(p.index) <= set(view.calendar), "expected_returns index must be ⊆ view.calendar"
 
 
 def check_determinism(estimator: Any, view_factory: ViewFactory) -> None:
@@ -245,35 +262,52 @@ def check_determinism(estimator: Any, view_factory: ViewFactory) -> None:
             equal_nan=True,
             err_msg="forecast is non-deterministic across identical fits",
         )
+    if capabilities.TO_PRICING in ext:
+        _assert_weights_equal_on_common(
+            _expected_returns(m1, view_factory()),
+            _expected_returns(m2, view_factory()),
+            "expected_returns is non-deterministic across identical fits",
+        )
 
 
 def check_no_lookahead(estimator: Any, view_factory: ViewFactory) -> None:
-    """``to_weights`` outputs up to ``t`` are invariant to mutating data strictly after ``t``.
+    """``to_weights`` / ``expected_returns`` up to ``t`` are invariant to mutating data after ``t``.
 
-    Only ``to_weights`` is probed. A weights model is handed a multi-date view and must window
-    internally, so a leak (using post-``t`` data for a ``<= t`` weight) shows up here as a changed
-    weight when the future is perturbed. ``to_forecast`` is **not** probed: the engine only ever
-    passes ``forecast()`` a prefix-truncated ``view.window(origin)``, so a forecast at origin
-    ``d <= t`` cannot see post-``t`` data and a perturbation probe could never fail — a forecast
-    leak instead surfaces in the zoo's engine ≡ vectorized equality test (module docstring).
+    Both multi-date extraction surfaces (a weight stream and a priced cross-section) are handed a
+    view spanning data after ``t`` and must window internally, so a leak — using post-``t`` data for
+    a ``<= t`` row — shows up here as a changed row when the future is perturbed. ``to_forecast`` is
+    **not** probed: the engine only ever passes ``forecast()`` a prefix-truncated
+    ``view.window(origin)``, so a forecast at origin ``d <= t`` cannot see post-``t`` data and a
+    perturbation probe could never fail — a forecast leak instead surfaces in the zoo's
+    engine ≡ vectorized equality test (module docstring).
     """
-    model = _fit(estimator, view_factory())
-    if capabilities.TO_WEIGHTS not in _caps(model):
-        return  # forecast-only / pricing-only: forecast PIT is structural (see docstring)
+    caps = _caps(_fit(estimator, view_factory()))
+    probes = caps & {capabilities.TO_WEIGHTS, capabilities.TO_PRICING}
+    if not probes:
+        return  # forecast-only: forecast PIT is structural (see docstring)
     view = view_factory()
     cal = view.calendar
     assert len(cal) >= 8, "no-look-ahead check needs a view with >= 8 calendar dates"
     t = cal[_origin_index(view)]
     twin = _perturb_after(view, t)
     # Extract over the FULL view (which contains data after t); a PIT-respecting model windows
-    # internally, so its weights at dates <= t must ignore the perturbed tail.
-    w_a = _weights(_fit(estimator, view.window(t)), view)
-    w_b = _weights(_fit(estimator, twin.window(t)), twin)
-    _assert_weights_equal_on_common(
-        _restrict_weights(w_a, t),
-        _restrict_weights(w_b, t),
-        "to_weights at dates <= t changed when only post-t data was mutated (look-ahead)",
-    )
+    # internally, so its rows at dates <= t must ignore the perturbed tail.
+    model_a = _fit(estimator, view.window(t))
+    model_b = _fit(estimator, twin.window(t))
+    if capabilities.TO_WEIGHTS in probes:
+        _assert_weights_equal_on_common(
+            _restrict_weights(_weights(model_a, view), t),
+            _restrict_weights(_weights(model_b, twin), t),
+            "to_weights at dates <= t changed when only post-t data was mutated (look-ahead)",
+        )
+    if capabilities.TO_PRICING in probes:
+        pa = _expected_returns(model_a, view)
+        pb = _expected_returns(model_b, twin)
+        _assert_weights_equal_on_common(
+            pa.loc[pa.index <= t],
+            pb.loc[pb.index <= t],
+            "expected_returns at dates <= t changed when only post-t data was mutated (look-ahead)",
+        )
 
 
 def check_engine_roundtrip(
@@ -319,7 +353,17 @@ def check_engine_roundtrip(
         rows = OOSR2Evaluator().evaluate(out)
         validate_result(rows)
         assert len(rows) >= 1
-    # capability-only methods (to_pricing) have no walk-forward driver yet — nothing to run.
+    elif capabilities.TO_PRICING in caps and isinstance(view, TimeSeriesView | CrossSectionView):
+        sp = splitter or WalkForwardSplitter(
+            min_train=warmup, test_size=max(1, n - warmup), expanding=True
+        )
+        out = walk_forward_pricing(estimator, view, sp, method="conformance")
+        assert not out.predicted.empty, (
+            "walk_forward_pricing produced no predictions (widen the fixture/splitter)"
+        )
+        rows = CrossSectionalR2Evaluator().evaluate(out)
+        validate_result(rows)
+        assert len(rows) >= 1
 
 
 def check_estimator(

@@ -8,6 +8,7 @@ open evaluator registry so external packages add peers without editing core.
 
 from __future__ import annotations
 
+import warnings
 from typing import ClassVar, Protocol
 
 import numpy as np
@@ -15,7 +16,12 @@ import pandas as pd
 from scipy.stats import norm
 
 from numeraire.core import capabilities
-from numeraire.core.engine import ForecastOutput, PanelWeightsOutput, WeightsOutput
+from numeraire.core.engine import (
+    ForecastOutput,
+    PanelWeightsOutput,
+    PricingOutput,
+    WeightsOutput,
+)
 from numeraire.core.registry import register_evaluator
 from numeraire.core.schema import RESULT_COLUMNS
 from numeraire.core.stats import alpha_regression, certainty_equivalent, newey_west_lrv
@@ -37,7 +43,12 @@ class _HasProvenance(Protocol):
 
 
 def _row(out: _HasProvenance, metric: str, value: float, date: object) -> dict[str, object]:
-    """Build one result-schema row from an OOS output's provenance plus a (metric, value)."""
+    """Build one result-schema row from an OOS output's provenance plus a (metric, value).
+
+    ``protocol`` is read from the output when present (a :class:`PricingOutput` carries its
+    ``"walk_forward"`` / ``"in_sample"`` label) and defaults to ``"walk_forward"`` otherwise — every
+    weights/forecast output is produced by a walk-forward driver, so that is its intrinsic protocol.
+    """
     return {
         "run_id": out.run_id,
         "method": out.method,
@@ -46,6 +57,7 @@ def _row(out: _HasProvenance, metric: str, value: float, date: object) -> dict[s
         "value": value,
         "universe": out.universe,
         "capability": out.capability,
+        "protocol": getattr(out, "protocol", "walk_forward"),
         "config_hash": out.config_hash,
         "data_vintage": out.data_vintage,
     }
@@ -259,6 +271,71 @@ class CEQEvaluator:
         return _frame([_row(oos_output, "ceq", ceq, s.index[-1])])
 
 
+def _pricing_means(out: PricingOutput) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per-asset time-mean predicted and realized returns + a finite mask (assets with both)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN asset columns -> NaN mean
+        mp = np.nanmean(out.predicted.to_numpy(dtype=np.float64), axis=0)
+        mr = np.nanmean(out.realized.to_numpy(dtype=np.float64), axis=0)
+    finite = np.isfinite(mp) & np.isfinite(mr)
+    return mp, mr, finite
+
+
+def _pricing_date(out: PricingOutput) -> object:
+    """The output's last prediction date (``NaT`` for an empty panel), for the result row."""
+    idx = out.predicted.index
+    return idx[-1] if len(idx) else pd.NaT
+
+
+class CrossSectionalR2Evaluator:
+    """Cross-sectional R^2 of mean realized returns on mean predicted expected returns (OLS).
+
+    The pricing headline (the classic average-realized-vs-average-predicted plot): time-average each
+    asset's realized and predicted returns, then OLS-regress mean realized on mean predicted across
+    assets and report the R^2. Assets missing either mean are dropped. Read against the output's
+    ``protocol`` — an ``"in_sample"`` R^2 is explanatory, a ``"walk_forward"`` R^2 is out-of-sample.
+    """
+
+    requires: ClassVar[set[str]] = {capabilities.TO_PRICING}
+
+    def evaluate(self, oos_output: object) -> pd.DataFrame:
+        if not isinstance(oos_output, PricingOutput):
+            raise TypeError("CrossSectionalR2Evaluator requires a PricingOutput")
+        mp, mr, finite = _pricing_means(oos_output)
+        mp, mr = mp[finite], mr[finite]
+        if mp.size < 2:
+            r2 = float("nan")
+        else:
+            x = np.column_stack([np.ones(mp.size), mp])
+            coef, *_ = np.linalg.lstsq(x, mr, rcond=None)
+            resid = mr - x @ coef
+            ss_res = float(resid @ resid)
+            ss_tot = float(((mr - mr.mean()) ** 2).sum())
+            r2 = float("nan") if ss_tot == 0.0 else 1.0 - ss_res / ss_tot
+        return _frame([_row(oos_output, "xs_r2", r2, _pricing_date(oos_output))])
+
+
+class AverageAbsAlphaEvaluator:
+    """Average absolute pricing error (mean over assets of ``|mean realized - mean predicted|``).
+
+    Each asset's alpha is its mean realized return minus its mean predicted expected return; the
+    metric is the cross-sectional mean of the absolute alphas (in the input's return units). The
+    magnitude companion to :class:`CrossSectionalR2Evaluator`. (Factor-model joint zero-alpha
+    inference stays in :func:`numeraire.core.stats.grs_test`, which needs the factor returns this
+    generic pricing surface deliberately does not assume.)
+    """
+
+    requires: ClassVar[set[str]] = {capabilities.TO_PRICING}
+
+    def evaluate(self, oos_output: object) -> pd.DataFrame:
+        if not isinstance(oos_output, PricingOutput):
+            raise TypeError("AverageAbsAlphaEvaluator requires a PricingOutput")
+        mp, mr, finite = _pricing_means(oos_output)
+        alpha = (mr - mp)[finite]
+        value = float(np.mean(np.abs(alpha))) if alpha.size else float("nan")
+        return _frame([_row(oos_output, "avg_abs_alpha", value, _pricing_date(oos_output))])
+
+
 # Bundled native evaluators register on import (open registry).
 register_evaluator("sharpe", SharpeEvaluator(), overwrite=True)
 register_evaluator("ceq", CEQEvaluator(), overwrite=True)
@@ -267,3 +344,5 @@ register_evaluator("strategy_return", StrategyReturnEvaluator(), overwrite=True)
 register_evaluator("oos_r2", OOSR2Evaluator(), overwrite=True)
 register_evaluator("sed", SquaredErrorDiffEvaluator(), overwrite=True)
 register_evaluator("clark_west", ClarkWestEvaluator(), overwrite=True)
+register_evaluator("xs_r2", CrossSectionalR2Evaluator(), overwrite=True)
+register_evaluator("avg_abs_alpha", AverageAbsAlphaEvaluator(), overwrite=True)
