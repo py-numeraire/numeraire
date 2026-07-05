@@ -42,6 +42,7 @@ from numeraire.core.registry import (
 )
 from numeraire.core.schema import RESULT_COLUMNS, validate_result
 from numeraire.core.simulate import RebalanceSchedule, SimulationResult, simulate_weights
+from numeraire.core.sorts import SortResult, make_sorts
 from numeraire.core.splitter import WalkForwardSplitter, validation_split
 from numeraire.core.stats import (
     adjust_tests,
@@ -72,6 +73,7 @@ __all__ = [
     "RebalanceSchedule",
     "SharpeEvaluator",
     "SimulationResult",
+    "SortResult",
     "Splitter",
     "SquaredErrorDiffEvaluator",
     "StrategyReturnEvaluator",
@@ -89,6 +91,7 @@ __all__ = [
     "config_hash",
     "get_evaluator",
     "grs_test",
+    "make_sorts",
     "newey_west_lrv",
     "performance_fee",
     "register_evaluator",

@@ -129,6 +129,27 @@ def test_oos_r2_rejects_wrong_output() -> None:
         OOSR2Evaluator().evaluate(object())
 
 
+def test_oos_r2_zero_benchmark_gkx_convention() -> None:
+    # zero benchmark: SSE_bench = sum r^2, ignoring the historical mean carried in the output
+    f = [0.08, 0.10, -0.02]
+    r = [0.10, 0.05, 0.00]
+    out = _forecast_output(f, r, [0.04, 0.04, 0.04])
+    sse_m = np.sum((np.array(r) - np.array(f)) ** 2)
+    sse_zero = np.sum(np.array(r) ** 2)
+    expected = (1 - sse_m / sse_zero) * 100
+    np.testing.assert_allclose(
+        OOSR2Evaluator(benchmark="zero").evaluate(out).iloc[0]["value"], expected
+    )
+    # differs from the historical-mean number
+    hist = OOSR2Evaluator().evaluate(out).iloc[0]["value"]
+    assert hist != pytest.approx(expected)
+
+
+def test_oos_r2_rejects_unknown_benchmark() -> None:
+    with pytest.raises(ValueError, match="benchmark must be one of"):
+        OOSR2Evaluator(benchmark="bogus")
+
+
 def test_strategy_return_emits_one_row_per_date() -> None:
     rets = [0.02, -0.01, 0.03, 0.01]
     out = _output([1.0] * len(rets), rets)
