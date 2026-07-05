@@ -102,6 +102,19 @@ class GoldenCase:
         stray = set(self.tolerance) - set(self.expected)
         if stray:
             raise ValueError(f"{self.name}: tolerance names non-expected metrics {sorted(stray)}")
+        # A zero band demands bit-exact equality, which is only meaningful for an integer target
+        # (a count, N, …); a float scalar with no tolerance can never match across data vintages and
+        # is almost always a forgotten band — reject it at construction.
+        zero_band_floats = [
+            m
+            for m, target in self.expected.items()
+            if float(self.tolerance.get(m, 0.0)) == 0.0 and not float(target).is_integer()
+        ]
+        if zero_band_floats:
+            raise ValueError(
+                f"{self.name}: metric(s) {sorted(zero_band_floats)} have a zero tolerance band but "
+                f"a non-integer target; give a band, or use an integer target for exact counts"
+            )
 
     def is_available(self) -> bool:
         """Whether this case's data is reachable here (``True`` when no predicate is set)."""
