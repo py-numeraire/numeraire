@@ -4,6 +4,8 @@ A research framework providing a **stable bedrock** for **backtesting, comparing
 replicating** empirical asset-pricing / financial-econometrics methods (IPCA, VoC, KNS, 1/A,
 factor-model tests, …), **extensible by design** so new methods plug in as first-class extensions.
 
+**Documentation:** <https://py-numeraire.github.io/numeraire/>
+
 The *numéraire* is the reference unit against which all prices are measured. Core stays
 **representation-agnostic**: it defines *capabilities* (what a model can produce — weights, pricing,
 …), never a specific method's internal form, so linear-factor, nonlinear/RFF, neural, and

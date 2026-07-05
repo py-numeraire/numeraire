@@ -808,7 +808,8 @@ class CrossSectionView:
     def to_tensor(self) -> PanelTensor:
         """Dense ``(T x N x K)`` eject + an ``(T x N)`` presence mask (nan-padded; see PanelTensor).
 
-        ``T`` = this view's dates, ``N`` = the union asset axis (:attr:`assets`), ``K`` = chars.
+        ``T`` = this view's dates, ``N`` = the union asset axis
+        (:attr:`~numeraire.core.data.CrossSectionView.assets`), ``K`` = chars.
         """
         present, cols = np.unique(self._codes, return_inverse=True)
         assets = [str(self._labels[c]) for c in present]

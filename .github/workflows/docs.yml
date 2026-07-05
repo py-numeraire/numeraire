@@ -1,0 +1,51 @@
+# Build the Sphinx documentation and publish it to GitHub Pages.
+#
+# This runs only on pushes to `main` that touch the docs or the documented source, and only the
+# deploy step needs write access — permissions are scoped to the minimum Pages/OIDC set. Nothing is
+# published from a pull request, so the site never changes before a change is merged.
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "src/**"
+      - "pyproject.toml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+# Allow the workflow to mint an OIDC token and publish to Pages; read-only otherwise.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One in-flight deployment at a time; let a newer push supersede an older run.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: { python-version: "3.12" }
+      - run: uv sync --extra docs
+      - name: Build docs (warnings are errors)
+        run: uv run sphinx-build -W --keep-going -b html docs docs/_build/html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/_build/html
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
