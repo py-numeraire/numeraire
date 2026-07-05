@@ -17,6 +17,7 @@ from numeraire import (
     WeightsOutput,
     alpha_regression,
     clark_west,
+    fama_macbeth,
     grs_test,
     newey_west_lrv,
     sharpe_diff_test,
@@ -245,6 +246,75 @@ def test_adjust_tests_mechanics_with_robust_margins() -> None:
         adj = adjust_tests(p, method=method, alpha=0.05).adjusted_p
         assert (np.diff(np.sort(adj)) >= -1e-15).all()
         assert (adj >= p - 1e-15).all()  # adjustment never makes a test easier
+
+
+def _fm_panel(seed: int, t_n: int = 200, n: int = 25, k: int = 2, noise: float = 0.002):
+    """A factor DGP ``r_it = beta_i' f_t + eps`` — FM premia recover ``mean_t f_t``."""
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range("2000-01-31", periods=t_n, freq="ME")
+    f = rng.normal(0.01, 0.03, size=(t_n, k))
+    betas = rng.normal(1.0, 0.5, size=(n, k))
+    eps = rng.normal(0.0, noise, size=(t_n, n))
+    r = f @ betas.T + eps
+    returns = pd.DataFrame(r, index=idx, columns=[f"a{j}" for j in range(n)])
+    factors = pd.DataFrame(f, index=idx, columns=[f"F{j}" for j in range(k)])
+    return returns, factors
+
+
+def test_fama_macbeth_recovers_known_dgp() -> None:
+    # with r_t = beta @ f_t + tiny noise, the period-t cross-sectional slope ~= f_t, so the FM mean
+    # premium recovers the mean factor return and the intercept is ~0.
+    returns, factors = _fm_panel(0)
+    res = fama_macbeth(returns, factors)
+    assert res.names == ("const", "F0", "F1")
+    assert res.n_periods == 200
+    assert res.n_assets == 25
+    np.testing.assert_allclose(res.premia[0], 0.0, atol=2e-3)  # intercept
+    np.testing.assert_allclose(res.premia[1:], factors.to_numpy().mean(axis=0), atol=2e-3)
+    assert res.t_stats[1] > 2.0 and res.t_stats[2] > 2.0  # priced factors are significant
+
+
+def test_fama_macbeth_shanken_inflates_standard_errors() -> None:
+    returns, factors = _fm_panel(1)
+    plain = fama_macbeth(returns, factors, shanken=False)
+    shanken = fama_macbeth(returns, factors, shanken=True)
+    # the errors-in-variables correction is a factor (1 + lambda' Sigma_f^-1 lambda) >= 1
+    assert np.all(shanken.se >= plain.se - 1e-15)
+    assert np.any(shanken.se > plain.se)
+    np.testing.assert_allclose(shanken.premia, plain.premia)  # point estimates unchanged
+
+
+def test_fama_macbeth_newey_west_changes_tstats() -> None:
+    returns, factors = _fm_panel(2)
+    base = fama_macbeth(returns, factors, nw_lags=0)
+    nw = fama_macbeth(returns, factors, nw_lags=6)
+    np.testing.assert_allclose(nw.premia, base.premia)
+    assert not np.allclose(nw.t_stats, base.t_stats)  # HAC variance moves the denominator
+
+
+def test_fama_macbeth_guards() -> None:
+    returns, factors = _fm_panel(3, t_n=200)
+    with pytest.raises(ValueError, match="nw_lags"):
+        fama_macbeth(returns, factors, nw_lags=-1)
+    with pytest.raises(ValueError, match="K\\+2"):
+        fama_macbeth(returns.iloc[:3], factors.iloc[:3])
+
+
+def test_fama_macbeth_tolerates_missing_cells() -> None:
+    # NaN return cells are dropped per period (pass 2) / per asset (pass 1); premia still recover.
+    returns, factors = _fm_panel(4)
+    returns.iloc[10, 0] = np.nan
+    returns.iloc[20:25, 3] = np.nan
+    res = fama_macbeth(returns, factors)
+    assert res.n_assets == 25
+    np.testing.assert_allclose(res.premia[1:], factors.to_numpy().mean(axis=0), atol=3e-3)
+
+
+def test_fama_macbeth_raises_without_enough_cross_sections() -> None:
+    # a single asset can never identify a two-factor cross-section (needs >= K+1 names per date)
+    returns, factors = _fm_panel(5, n=1, k=2)
+    with pytest.raises(ValueError, match="two identifiable cross-sections"):
+        fama_macbeth(returns, factors)
 
 
 def test_adjust_tests_guards() -> None:

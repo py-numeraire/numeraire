@@ -10,6 +10,8 @@ Small, closed-form statistical tests the evaluator layer and reference-result te
   (the companion to the Goyal-Welch OOS R²; plain Diebold-Mariano is oversized for nested models).
 - :func:`alpha_regression` — time-series alpha vs a factor benchmark with HAC (Newey-West)
   standard errors (the volatility-managed-portfolio-style headline regression).
+- :func:`fama_macbeth` — Fama-MacBeth (1973) two-pass cross-sectional risk-premia estimation with
+  FM t-statistics, optional Shanken (1992) errors-in-variables and Newey-West corrections.
 - :func:`adjust_tests` — multiple-testing adjustments for factor-zoo sweeps (Bonferroni, Holm,
   Benjamini-Yekutieli), the Harvey-Liu-Zhu (2016) toolbox behind the "t > 3.0" hurdle.
 - :func:`newey_west_lrv` — the shared Bartlett-kernel long-run variance helper.
@@ -315,6 +317,118 @@ def alpha_regression(
         betas=np.asarray(coef[1:], dtype=np.float64),
         r2=1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan"),
         n_obs=t_n,
+    )
+
+
+@dataclass(frozen=True)
+class FamaMacBethResult:
+    """Two-pass Fama-MacBeth (1973) cross-sectional risk-premia estimates + FM t-statistics.
+
+    ``premia`` / ``t_stats`` / ``se`` are aligned to ``names`` (``"const"`` then the factor
+    columns). ``t_stats`` carry the Shanken (1992) errors-in-variables inflation and/or the
+    Newey-West autocorrelation correction exactly as requested at call time.
+    """
+
+    names: tuple[str, ...]
+    premia: Float
+    t_stats: Float
+    se: Float
+    n_periods: int
+    n_assets: int
+    shanken: bool
+    nw_lags: int
+
+
+def fama_macbeth(
+    returns_panel: pd.DataFrame,
+    factors: pd.DataFrame,
+    *,
+    shanken: bool = False,
+    nw_lags: int = 0,
+) -> FamaMacBethResult:
+    """Two-pass Fama-MacBeth (1973) cross-sectional regression of returns on factor exposures.
+
+    ``returns_panel`` are ``(date x asset)`` test-asset returns, ``factors`` ``(date x K)`` factor
+    returns; the two are inner-joined on their date index. The procedure::
+
+        pass 1 (time series):  r_i = a_i + b_i' F + e_i         -> beta_i  (per asset i)
+        pass 2 (cross section, each date t):
+                               r_t = gamma0_t + gamma_t' beta + u_t
+        premia = mean_t [gamma0_t, gamma_t] ,  FM se = std_t / sqrt(T)
+
+    The first pass estimates each asset's factor loadings on the full sample; each period's
+    cross-sectional OLS of that period's returns on those loadings gives a premia draw, and the
+    Fama-MacBeth estimate is the time-series mean of the draws with the time-series-of-means
+    standard error (so cross-sectional correlation is handled by construction).
+
+    ``nw_lags > 0`` replaces the i.i.d. FM variance of the premia series with its Newey-West
+    (Bartlett) long-run variance (autocorrelated premia). ``shanken=True`` multiplies the premia
+    variances by the Shanken (1992) errors-in-variables factor ``1 + lambda' Sigma_f^-1 lambda``
+    (``lambda`` the estimated slope premia, ``Sigma_f`` the MLE factor covariance), correcting the
+    downward bias from using *estimated* betas as regressors; it inflates the standard errors. The
+    two corrections compose. Per period, only assets with a finite return and finite loadings enter
+    that cross-section; an asset needs enough finite observations to identify its betas.
+    """
+    if nw_lags < 0:
+        raise ValueError(f"nw_lags must be >= 0; got {nw_lags}")
+    joined = returns_panel.join(factors, how="inner", lsuffix="_ret", rsuffix="_fac")
+    ret = joined.iloc[:, : returns_panel.shape[1]].to_numpy(dtype=np.float64)
+    fac = joined.iloc[:, returns_panel.shape[1] :].to_numpy(dtype=np.float64)
+    t_n, n_assets = ret.shape
+    k = fac.shape[1]
+    names = ("const", *(str(c) for c in factors.columns))
+    if t_n < k + 2:
+        raise ValueError(f"need at least K+2 overlapping dates; got T={t_n}, K={k}")
+
+    # --- pass 1: per-asset time-series loadings (drop that asset's non-finite rows) ---
+    betas = np.full((n_assets, k), np.nan, dtype=np.float64)
+    for i in range(n_assets):
+        m = np.isfinite(ret[:, i]) & np.isfinite(fac).all(axis=1)
+        if int(m.sum()) < k + 1:
+            continue
+        x = np.column_stack([np.ones(int(m.sum())), fac[m]])
+        yb = np.asarray(ret[m, i], dtype=np.float64)
+        coef, *_ = np.linalg.lstsq(x, yb, rcond=None)
+        betas[i] = coef[1:]
+
+    # --- pass 2: per-date cross-sectional premia on [1, betas] ---
+    beta_ok = np.isfinite(betas).all(axis=1)
+    gammas: list[NDArray[np.float64]] = []
+    for t in range(t_n):
+        m = beta_ok & np.isfinite(ret[t])
+        if int(m.sum()) < k + 1:
+            continue
+        x = np.column_stack([np.ones(int(m.sum())), betas[m]])
+        yb = np.asarray(ret[t, m], dtype=np.float64)
+        coef, *_ = np.linalg.lstsq(x, yb, rcond=None)
+        gammas.append(np.asarray(coef, dtype=np.float64).ravel())
+    if len(gammas) < 2:
+        raise ValueError("fewer than two identifiable cross-sections — cannot form FM t-stats")
+    gamma = np.vstack(gammas)  # (T_eff x (K+1))
+    t_eff = gamma.shape[0]
+    premia = gamma.mean(axis=0)
+
+    var = np.array(
+        [newey_west_lrv(gamma[:, j], nw_lags) / t_eff for j in range(k + 1)], dtype=np.float64
+    )
+    if shanken:
+        fac_ok = fac[np.isfinite(fac).all(axis=1)]
+        omega = np.asarray(np.cov(fac_ok, rowvar=False, ddof=0), dtype=np.float64).reshape(k, k)
+        lam = np.asarray(premia[1:], dtype=np.float64)
+        correction = 1.0 + float(lam @ np.linalg.solve(omega, lam))
+        var = var * correction
+    se = np.sqrt(var)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t_stats = np.where(se > 0, premia / se, np.nan)
+    return FamaMacBethResult(
+        names=names,
+        premia=premia,
+        t_stats=t_stats,
+        se=se,
+        n_periods=t_eff,
+        n_assets=n_assets,
+        shanken=shanken,
+        nw_lags=nw_lags,
     )
 
 
