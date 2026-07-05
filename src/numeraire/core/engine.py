@@ -22,7 +22,12 @@ import pandas as pd
 
 from numeraire.core import capabilities
 from numeraire.core.data import CrossSectionView, Float, TimeSeriesView
-from numeraire.core.protocols import Estimator, SupportsForecast, SupportsWeights
+from numeraire.core.protocols import (
+    Estimator,
+    SupportsForecast,
+    SupportsPricing,
+    SupportsWeights,
+)
 
 _T = TypeVar("_T")
 _R = TypeVar("_R")
@@ -143,6 +148,36 @@ class ForecastOutput:
     def universe(self) -> str:
         """Compact universe label (``n=<#assets>`` for panels, the name for a single asset)."""
         cols = [str(c) for c in self.forecasts.columns]
+        return cols[0] if len(cols) == 1 else f"n={len(cols)}"
+
+
+@dataclass(frozen=True)
+class PricingOutput:
+    """Output for a ``to_pricing`` method: predicted expected returns vs realized, on test assets.
+
+    ``predicted`` and ``realized`` are both ``(date x asset)``: ``predicted.loc[t]`` is the model's
+    cross-section of expected returns for the return realized over ``(t, t+h]`` and
+    ``realized.loc[t]`` is that realized return (``nan`` for an asset absent / not yet realized at
+    ``t``). ``protocol`` records the discipline the panels were produced under — ``"walk_forward"``
+    (per-fold PIT refits, :func:`walk_forward_pricing`) or ``"in_sample"`` (one full-sample fit,
+    :func:`pricing_in_sample`) — and flows straight through to every result row so an explanatory
+    in-sample R^2 stays distinguishable from an out-of-sample one.
+    """
+
+    predicted: pd.DataFrame
+    realized: pd.DataFrame
+    method: str
+    config_hash: str
+    data_vintage: str
+    run_id: str
+    protocol: str
+    capability: str = capabilities.TO_PRICING
+    meta: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def universe(self) -> str:
+        """Compact universe label (``n=<#assets>`` for panels, the name for a single asset)."""
+        cols = [str(c) for c in self.predicted.columns]
         return cols[0] if len(cols) == 1 else f"n={len(cols)}"
 
 
@@ -427,4 +462,149 @@ def walk_forward_panel(
         config_hash=chash,
         data_vintage=data_vintage,
         run_id=rid,
+    )
+
+
+def _pricing_realized(view: Any, predicted: pd.DataFrame) -> pd.DataFrame:
+    """Realized ``(t, t+h]`` returns aligned to ``predicted``'s ``(date x asset)`` shape.
+
+    Pulled from the same view the model was fit on, so the model never touches future returns:
+    ``realized.loc[t, a]`` is asset ``a``'s return over ``(t, t+h]`` (``nan`` where ``a`` is absent
+    at ``t`` or the horizon is not yet realized in-view). Handles both concrete view shapes — a
+    :class:`~numeraire.core.data.TimeSeriesView` returns block or a ragged
+    :class:`~numeraire.core.data.CrossSectionView` cross-section.
+    """
+    index = predicted.index
+    columns = [str(c) for c in predicted.columns]
+    col_pos = {c: j for j, c in enumerate(columns)}
+    out = np.full((len(index), len(columns)), np.nan, dtype=np.float64)
+    if isinstance(view, TimeSeriesView):
+        assets = view.assets
+        for i, t in enumerate(index):
+            y = view.target_asof(t)
+            for a, val in zip(assets, y, strict=True):
+                j = col_pos.get(a)
+                if j is not None:
+                    out[i, j] = val
+    elif isinstance(view, CrossSectionView):
+        for i, t in enumerate(index):
+            ids, y = view.target_asof(t)
+            for a, val in zip(ids, y, strict=True):
+                j = col_pos.get(str(a))
+                if j is not None:
+                    out[i, j] = val
+    else:
+        raise TypeError(
+            f"pricing driver cannot align realized returns for a {type(view).__name__}; "
+            "pass a TimeSeriesView or CrossSectionView"
+        )
+    return pd.DataFrame(out, index=index, columns=predicted.columns)
+
+
+def _finalize_pricing(
+    predicted: pd.DataFrame, realized: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Drop prediction dates whose realized cross-section is fully unrealized (the horizon tail)."""
+    if predicted.empty:
+        return predicted, realized
+    keep = ~realized.isna().to_numpy().all(axis=1)
+    return predicted.iloc[keep], realized.iloc[keep]
+
+
+def walk_forward_pricing(
+    estimator: Estimator,
+    view: Any,
+    splitter: Any,
+    *,
+    method: str,
+    config: dict[str, Any] | None = None,
+    data_vintage: str = "unknown",
+    run_id: str | None = None,
+    n_jobs: int = 1,
+) -> PricingOutput:
+    """Walk-forward OOS pricing of a ``to_pricing`` estimator: pooled predicted vs realized panels.
+
+    Mirrors :func:`walk_forward`: for each ``(train, test)`` fold the estimator is fit on the PIT
+    train window and its fitted model prices the test window via
+    :meth:`~numeraire.core.protocols.SupportsPricing.expected_returns`; realized ``(t, t+h]``
+    returns are pulled from the full ``view`` (never the model), and the per-fold cross-sections are
+    pooled into one ``(date x asset)`` panel pair tagged ``protocol="walk_forward"``. Works on
+    a :class:`~numeraire.core.data.TimeSeriesView` (SDF-style N-asset block) or a
+    :class:`~numeraire.core.data.CrossSectionView` (characteristic panel). ``n_jobs`` fans the folds
+    over a thread pool (``-1`` = all cores); order-preserving, so identical output.
+    """
+    chash = config_hash(config)
+    rid = run_id if run_id is not None else f"{method}-{chash}"
+
+    def _run(fold: tuple[Any, Any]) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+        train, test = fold
+        model = estimator.fit(train)
+        if capabilities.TO_PRICING not in model.capabilities() or not isinstance(
+            model, SupportsPricing
+        ):
+            raise TypeError(f"{method}: fitted model does not support 'to_pricing'")
+        pred = model.expected_returns(test)
+        if pred.empty:
+            return None
+        pred, realized = _finalize_pricing(pred, _pricing_realized(view, pred))
+        if pred.empty:
+            return None
+        return pred, realized
+
+    results = _map_folds(_run, list(splitter.split(view)), n_jobs)
+    p_parts: list[pd.DataFrame] = [r[0] for r in results if r is not None]
+    r_parts: list[pd.DataFrame] = [r[1] for r in results if r is not None]
+    if p_parts:
+        predicted = pd.concat(p_parts).sort_index()
+        realized_df = pd.concat(r_parts).sort_index()
+    else:
+        predicted = pd.DataFrame(columns=view.assets)
+        realized_df = pd.DataFrame(columns=view.assets)
+    return PricingOutput(
+        predicted=predicted,
+        realized=realized_df,
+        method=method,
+        config_hash=chash,
+        data_vintage=data_vintage,
+        run_id=rid,
+        protocol="walk_forward",
+    )
+
+
+def pricing_in_sample(
+    estimator: Estimator,
+    view: Any,
+    *,
+    method: str,
+    config: dict[str, Any] | None = None,
+    data_vintage: str = "unknown",
+    run_id: str | None = None,
+) -> PricingOutput:
+    """In-sample pricing: one full-sample fit, expected returns over the whole view (``in_sample``).
+
+    The paper cross-sectional-pricing tradition — a single fit on all of ``view`` (no walk-forward
+    discipline) whose expected returns are scored against the same sample's realized returns, tagged
+    ``protocol="in_sample"`` so the explanatory nature of the number is explicit in each result row.
+    Use :func:`walk_forward_pricing` for the out-of-sample counterpart.
+    """
+    chash = config_hash(config)
+    rid = run_id if run_id is not None else f"{method}-{chash}"
+    model = estimator.fit(view)
+    if capabilities.TO_PRICING not in model.capabilities() or not isinstance(
+        model, SupportsPricing
+    ):
+        raise TypeError(f"{method}: fitted model does not support 'to_pricing'")
+    pred = model.expected_returns(view)
+    if pred.empty:
+        predicted, realized_df = pred, pred.copy()
+    else:
+        predicted, realized_df = _finalize_pricing(pred, _pricing_realized(view, pred))
+    return PricingOutput(
+        predicted=predicted,
+        realized=realized_df,
+        method=method,
+        config_hash=chash,
+        data_vintage=data_vintage,
+        run_id=rid,
+        protocol="in_sample",
     )

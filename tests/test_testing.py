@@ -137,18 +137,45 @@ class _Panel:
         return _PanelModel(beta)
 
 
-# -- capability-only (to_pricing) ----------------------------------------------
+# -- pricing (to_pricing / expected_returns) -----------------------------------
 
 
 class _PricingModel:
+    """Unconditional pricer: each asset's train-sample mean, broadcast over the view calendar."""
+
+    def __init__(self, mu: pd.Series) -> None:
+        self._mu = mu  # indexed by (str) asset
+
     def capabilities(self) -> set[str]:
         return {capabilities.TO_PRICING}
+
+    def expected_returns(self, view: TimeSeriesView) -> pd.DataFrame:
+        row = self._mu.reindex([str(a) for a in view.assets]).to_numpy(np.float64)
+        vals = np.tile(row, (len(view.calendar), 1))
+        return pd.DataFrame(vals, index=view.calendar, columns=view.assets)
 
 
 class _Pricing:
     def fit(self, view: TimeSeriesView) -> _PricingModel:
+        mu = view.returns_frame().mean()
+        mu.index = [str(c) for c in mu.index]
+        return _PricingModel(mu)
+
+
+class _LeakyPricingModel:
+    def capabilities(self) -> set[str]:
+        return {capabilities.TO_PRICING}
+
+    def expected_returns(self, view: TimeSeriesView) -> pd.DataFrame:
+        last = view.returns_frame().to_numpy(np.float64)[-1]  # LEAK: the view's final row
+        vals = np.tile(last, (len(view.calendar), 1))
+        return pd.DataFrame(vals, index=view.calendar, columns=view.assets)
+
+
+class _LeakyPricing:
+    def fit(self, view: TimeSeriesView) -> _LeakyPricingModel:
         _ = view
-        return _PricingModel()
+        return _LeakyPricingModel()
 
 
 def test_correct_weights_estimator_passes() -> None:
@@ -161,9 +188,16 @@ def test_correct_panel_weights_estimator_passes() -> None:
     check_estimator(_Panel(), _panel_view)
 
 
-def test_capability_only_pricing_estimator_passes() -> None:
-    # to_pricing is not crystallized: capabilities passes, the weight/forecast checks no-op
-    check_estimator(_Pricing(), _ts_returns_only)
+def test_correct_pricing_estimator_passes() -> None:
+    # to_pricing is crystallized (expected_returns): the full suite applies to a pricing method
+    check_estimator(_Pricing(), _ts_returns_only, min_train=24)
+
+
+def test_leaky_pricing_estimator_fails_no_lookahead() -> None:
+    with pytest.raises(AssertionError, match="look-ahead"):
+        check_no_lookahead(_LeakyPricing(), _ts_returns_only)
+    with pytest.raises(AssertionError, match="look-ahead"):
+        check_estimator(_LeakyPricing(), _ts_returns_only, min_train=24)
 
 
 def test_perturb_after_rejects_unknown_view() -> None:

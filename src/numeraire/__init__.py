@@ -10,16 +10,21 @@ from numeraire.core.data import CrossSectionView, TimeSeriesView
 from numeraire.core.engine import (
     ForecastOutput,
     PanelWeightsOutput,
+    PricingOutput,
     WeightsOutput,
     config_hash,
+    pricing_in_sample,
     walk_forward,
     walk_forward_forecast,
     walk_forward_panel,
+    walk_forward_pricing,
 )
 from numeraire.core.evaluators import (
     AlphaEvaluator,
+    AverageAbsAlphaEvaluator,
     CEQEvaluator,
     ClarkWestEvaluator,
+    CrossSectionalR2Evaluator,
     MeanReturnEvaluator,
     OOSR2Evaluator,
     SharpeEvaluator,
@@ -33,6 +38,7 @@ from numeraire.core.protocols import (
     Model,
     Splitter,
     SupportsForecast,
+    SupportsPricing,
     SupportsWeights,
 )
 from numeraire.core.registry import (
@@ -59,9 +65,11 @@ from numeraire.core.stats import (
 __all__ = [
     "RESULT_COLUMNS",
     "AlphaEvaluator",
+    "AverageAbsAlphaEvaluator",
     "CEQEvaluator",
     "ClarkWestEvaluator",
     "CrossSectionView",
+    "CrossSectionalR2Evaluator",
     "DataView",
     "Estimator",
     "Evaluator",
@@ -70,6 +78,7 @@ __all__ = [
     "Model",
     "OOSR2Evaluator",
     "PanelWeightsOutput",
+    "PricingOutput",
     "RebalanceSchedule",
     "SharpeEvaluator",
     "SimulationResult",
@@ -78,6 +87,7 @@ __all__ = [
     "SquaredErrorDiffEvaluator",
     "StrategyReturnEvaluator",
     "SupportsForecast",
+    "SupportsPricing",
     "SupportsWeights",
     "TimeSeriesView",
     "WalkForwardSplitter",
@@ -94,6 +104,7 @@ __all__ = [
     "make_sorts",
     "newey_west_lrv",
     "performance_fee",
+    "pricing_in_sample",
     "register_evaluator",
     "return_loss",
     "sharpe_diff_test",
@@ -103,4 +114,5 @@ __all__ = [
     "walk_forward",
     "walk_forward_forecast",
     "walk_forward_panel",
+    "walk_forward_pricing",
 ]

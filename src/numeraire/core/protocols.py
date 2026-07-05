@@ -33,7 +33,7 @@ class Model(Protocol):
     """A fitted model. Exposes whatever capabilities it has — capabilities, not mandatory methods.
 
     Optional, dispatched by capability (do NOT make these mandatory):
-    ``to_weights(view) -> pd.DataFrame``, ``to_pricing(view) -> PricingResult``,
+    ``to_weights(view) -> pd.DataFrame``, ``expected_returns(view) -> pd.DataFrame``,
     ``to_density(view)``, ``to_surface(view)``, ...
     """
 
@@ -67,6 +67,26 @@ class SupportsForecast(Protocol):
 
     def forecast(self, view: DataView) -> pd.Series:
         """Per-asset forecast of the return over ``(t, t+h]`` (``t`` is the view's last date)."""
+        ...
+
+
+@runtime_checkable
+class SupportsPricing(Protocol):
+    """Capability protocol: a model that prices a cross-section of test assets (``to_pricing``).
+
+    The single shared operation across the pricing/SDF family (factor models, SDFs, three-pass
+    risk-premium estimators): the cross-section of **expected returns** on a set of assets. A
+    conditional model varies its estimate by date (e.g. a characteristics-driven loading times a
+    factor premium); an unconditional model returns the same row every date (broadcast). Advertised
+    via ``capabilities() >= {TO_PRICING}``.
+
+    Kept deliberately to this one method — the bespoke per-method accessors (loadings, latent
+    factors, per-candidate premia) stay method-local; only the pricing surface the framework's
+    evaluators and comparison harness consume is standardized here.
+    """
+
+    def expected_returns(self, view: DataView) -> pd.DataFrame:
+        """Return ``(date x asset)`` expected returns for each date in ``view.calendar``."""
         ...
 
 

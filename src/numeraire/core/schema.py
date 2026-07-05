@@ -16,10 +16,17 @@ RESULT_COLUMNS: tuple[str, ...] = (
     "value",
     "universe",
     "capability",
+    "protocol",
     "config_hash",
     "data_vintage",
 )
-"""Minimum columns every result table must carry (in any order)."""
+"""Minimum columns every result table must carry (in any order).
+
+``protocol`` labels the evaluation discipline the row was produced under: ``"walk_forward"`` (the
+framework's out-of-sample walk-forward path, which every weights/forecast evaluator emits) or
+``"in_sample"`` (a single full-sample fit, the paper cross-sectional-pricing tradition). It makes an
+explanatory in-sample number unconfusable with an out-of-sample one.
+"""
 
 
 def validate_result(df: pd.DataFrame) -> None:

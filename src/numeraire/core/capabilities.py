@@ -13,7 +13,7 @@ TO_FORECAST = "to_forecast"
 """Produces a conditional return forecast for the next horizon (predictive regressions)."""
 
 TO_PRICING = "to_pricing"
-"""Produces pricing output: factor loadings/parameters and pricing errors (alphas)."""
+"""Prices a cross-section of assets: ``(date x asset)`` expected returns (``expected_returns``)."""
 
 TO_DENSITY = "to_density"
 """(Future) produces a conditional return density."""
