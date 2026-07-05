@@ -10,11 +10,12 @@
    :toctree: generated
    :nosignatures:
 
-   walk_forward
-   walk_forward_panel
-   walk_forward_forecast
-   walk_forward_pricing
-   pricing_in_sample
+   backtest
+   backtest_weights
+   backtest_panel
+   backtest_forecast
+   backtest_pricing
+   backtest_pricing_in_sample
    config_hash
    WeightsOutput
    PanelWeightsOutput

@@ -22,7 +22,7 @@ from conftest import (
 )
 from numeraire.core import capabilities
 from numeraire.core.data import FeatureBlock, TimeSeriesView, VintagedBlock
-from numeraire.core.engine import WeightsOutput, walk_forward
+from numeraire.core.engine import WeightsOutput, backtest_weights
 from numeraire.core.splitter import WalkForwardSplitter
 
 
@@ -75,7 +75,7 @@ def test_market_timing_excess_end_to_end() -> None:
     raw, rf = toy_market()
     preds = toy_predictors()
     view = TimeSeriesView(raw, preds, risk_free=rf, horizon=1)  # raw -> excess internally
-    out = walk_forward(
+    out = backtest_weights(
         _OLSTimingEstimator(),
         view,
         WalkForwardSplitter(min_train=36, test_size=12),
@@ -93,7 +93,7 @@ def test_walk_forward_multi_asset_end_to_end() -> None:
     # a fixed 3-asset universe with shared predictors (the MV / portfolio shape): to_weights emits
     # a 3-column weight each period and the engine sums w*r across the 3 assets
     view = TimeSeriesView(toy_assets(), toy_predictors(), horizon=1)
-    out = walk_forward(
+    out = backtest_weights(
         _OLSTimingEstimator(), view, WalkForwardSplitter(min_train=30, test_size=6), method="multi"
     )
     assert list(out.weights.columns) == ["size", "value", "mom"]
@@ -195,7 +195,7 @@ def test_walk_forward_with_vintaged_block_end_to_end() -> None:
             VintagedBlock(toy_vintaged_table(n_refs=72), lag=1, name="fred"),
         ],
     )
-    out = walk_forward(
+    out = backtest_weights(
         _OLSTimingEstimator(),
         view,
         WalkForwardSplitter(min_train=30, test_size=6),

@@ -10,7 +10,7 @@ from numeraire.core import capabilities
 from numeraire.core.engine import ForecastOutput, WeightsOutput
 from numeraire.core.evaluators import (
     MeanReturnEvaluator,
-    OOSR2Evaluator,
+    OutOfSampleR2Evaluator,
     SharpeEvaluator,
     SquaredErrorDiffEvaluator,
     StrategyReturnEvaluator,
@@ -101,7 +101,7 @@ def test_oos_r2_registered_and_dispatches_on_forecast() -> None:
 
 def test_oos_r2_perfect_forecast_is_100() -> None:
     out = _forecast_output([0.1, 0.2, 0.0], [0.1, 0.2, 0.0], [0.05, 0.05, 0.05])
-    df = OOSR2Evaluator().evaluate(out)
+    df = OutOfSampleR2Evaluator().evaluate(out)
     validate_result(df)
     assert df.iloc[0]["metric"] == "oos_r2_pct"
     np.testing.assert_allclose(df.iloc[0]["value"], 100.0)
@@ -109,7 +109,7 @@ def test_oos_r2_perfect_forecast_is_100() -> None:
 
 def test_oos_r2_equal_to_benchmark_is_zero() -> None:
     out = _forecast_output([0.05, 0.05, 0.05], [0.1, 0.2, 0.0], [0.05, 0.05, 0.05])
-    df = OOSR2Evaluator().evaluate(out)
+    df = OutOfSampleR2Evaluator().evaluate(out)
     np.testing.assert_allclose(df.iloc[0]["value"], 0.0)
 
 
@@ -121,12 +121,12 @@ def test_oos_r2_matches_manual_formula() -> None:
     sse_m = np.sum((np.array(r) - np.array(f)) ** 2)
     sse_b = np.sum((np.array(r) - np.array(b)) ** 2)
     expected = (1 - sse_m / sse_b) * 100
-    np.testing.assert_allclose(OOSR2Evaluator().evaluate(out).iloc[0]["value"], expected)
+    np.testing.assert_allclose(OutOfSampleR2Evaluator().evaluate(out).iloc[0]["value"], expected)
 
 
 def test_oos_r2_rejects_wrong_output() -> None:
     with pytest.raises(TypeError):
-        OOSR2Evaluator().evaluate(object())
+        OutOfSampleR2Evaluator().evaluate(object())
 
 
 def test_oos_r2_zero_benchmark_gkx_convention() -> None:
@@ -138,16 +138,16 @@ def test_oos_r2_zero_benchmark_gkx_convention() -> None:
     sse_zero = np.sum(np.array(r) ** 2)
     expected = (1 - sse_m / sse_zero) * 100
     np.testing.assert_allclose(
-        OOSR2Evaluator(benchmark="zero").evaluate(out).iloc[0]["value"], expected
+        OutOfSampleR2Evaluator(benchmark="zero").evaluate(out).iloc[0]["value"], expected
     )
     # differs from the historical-mean number
-    hist = OOSR2Evaluator().evaluate(out).iloc[0]["value"]
+    hist = OutOfSampleR2Evaluator().evaluate(out).iloc[0]["value"]
     assert hist != pytest.approx(expected)
 
 
 def test_oos_r2_rejects_unknown_benchmark() -> None:
     with pytest.raises(ValueError, match="benchmark must be one of"):
-        OOSR2Evaluator(benchmark="bogus")
+        OutOfSampleR2Evaluator(benchmark="bogus")
 
 
 def test_strategy_return_emits_one_row_per_date() -> None:

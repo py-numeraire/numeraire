@@ -79,14 +79,14 @@ class InverseVol:
         return _InverseVolModel(self.lookback)
 ```
 
-That is the whole method. It now runs through {func}`~numeraire.core.engine.walk_forward` exactly
+That is the whole method. It now runs through {func}`~numeraire.core.engine.backtest` exactly
 like a bundled baseline:
 
 ```python
-from numeraire import SharpeEvaluator, TimeSeriesView, WalkForwardSplitter, walk_forward
+from numeraire import SharpeEvaluator, TimeSeriesView, WalkForwardSplitter, backtest
 
-out = walk_forward(InverseVol(lookback=6), view, WalkForwardSplitter(min_train=40, test_size=8),
-                   method="inverse_vol")
+out = backtest(InverseVol(lookback=6), view, WalkForwardSplitter(min_train=40, test_size=8),
+               method="inverse_vol")
 SharpeEvaluator().evaluate(out)
 ```
 

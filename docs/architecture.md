@@ -79,16 +79,19 @@ These are `Protocol`s, not base classes — a method conforms by duck typing, wi
 The engine is the most-reused, most-bug-prone, method-agnostic part of the framework, so it is kept
 deliberately small and shared. For each `(train, test)` fold it fits the estimator on the train
 view, asks the fitted model for its capability output on the test view, and computes realised
-profit-and-loss **from the original full view** — never from anything the model returns. One family
-member exists per capability, each returning a frozen, provenance-stamped output container:
+profit-and-loss **from the original full view** — never from anything the model returns.
+{func}`~numeraire.core.engine.backtest` is the discoverable entry point: it reads the fitted model's
+capability and the view type and dispatches to the right typed driver below (`in_sample=True`
+selects the in-sample pricing path). One typed driver exists per capability, each returning a
+frozen, provenance-stamped output container:
 
 | Driver | Capability | Output |
 | --- | --- | --- |
-| {func}`~numeraire.core.engine.walk_forward` | `to_weights` (time series) | {class}`~numeraire.core.engine.WeightsOutput` |
-| {func}`~numeraire.core.engine.walk_forward_panel` | `to_weights` (ragged panel) | {class}`~numeraire.core.engine.PanelWeightsOutput` |
-| {func}`~numeraire.core.engine.walk_forward_forecast` | `to_forecast` | {class}`~numeraire.core.engine.ForecastOutput` |
-| {func}`~numeraire.core.engine.walk_forward_pricing` | `to_pricing` (out-of-sample) | {class}`~numeraire.core.engine.PricingOutput` |
-| {func}`~numeraire.core.engine.pricing_in_sample` | `to_pricing` (explanatory) | {class}`~numeraire.core.engine.PricingOutput` |
+| {func}`~numeraire.core.engine.backtest_weights` | `to_weights` (time series) | {class}`~numeraire.core.engine.WeightsOutput` |
+| {func}`~numeraire.core.engine.backtest_panel` | `to_weights` (ragged panel) | {class}`~numeraire.core.engine.PanelWeightsOutput` |
+| {func}`~numeraire.core.engine.backtest_forecast` | `to_forecast` | {class}`~numeraire.core.engine.ForecastOutput` |
+| {func}`~numeraire.core.engine.backtest_pricing` | `to_pricing` (out-of-sample) | {class}`~numeraire.core.engine.PricingOutput` |
+| {func}`~numeraire.core.engine.backtest_pricing_in_sample` | `to_pricing` (explanatory) | {class}`~numeraire.core.engine.PricingOutput` |
 
 Every output carries a `config_hash` (a stable hash of the preprocessing/method config, so
 preprocessing is pinned as part of the method) and a `data_vintage` stamp, which flow into every

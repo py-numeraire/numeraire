@@ -42,27 +42,35 @@ view.calendar                               # the 180 monthly decision dates
 If your returns are *raw* rather than excess, pass `risk_free=<Series>` and they are converted
 internally. The forecast horizon defaults to one period; pass `horizon=` for multi-period targets.
 
-## 3. Walk forward
+## 3. Backtest
 
-{func}`~numeraire.core.engine.walk_forward` runs the out-of-sample loop for a `to_weights`
-method. A {class}`~numeraire.core.splitter.WalkForwardSplitter` yields expanding (or rolling)
-`(train, test)` folds; at each fold the estimator is fitted on the train view and asked for its
-weights on the test view, and realised profit-and-loss is computed from the original view so the
-model never touches future returns.
+{func}`~numeraire.core.engine.backtest` runs the out-of-sample loop. It is the discoverable entry
+point: it inspects the fitted model's capability (`to_weights` / `to_forecast` / `to_pricing`) and
+the view type and dispatches to the right typed driver, returning the matching output. A
+{class}`~numeraire.core.splitter.WalkForwardSplitter` yields expanding (or rolling) `(train, test)`
+folds; at each fold the estimator is fitted on the train view and asked for its weights on the test
+view, and realised profit-and-loss is computed from the original view so the model never touches
+future returns.
 
 We use the bundled {class}`~numeraire.baselines.EqualWeight` (1/N) baseline.
 
 ```python
-from numeraire import WalkForwardSplitter, walk_forward
+from numeraire import WalkForwardSplitter, backtest
 from numeraire.baselines import EqualWeight
 
 splitter = WalkForwardSplitter(min_train=60, test_size=12, expanding=True)
-result = walk_forward(
+result = backtest(
     EqualWeight(), view, splitter,
     method="equal_weight",
     data_vintage="synthetic-v1",
 )
 ```
+
+For an explicit return type (or to skip the one inspection fit `backtest` uses to read
+capabilities), call the typed driver directly — {func}`~numeraire.core.engine.backtest_weights`
+here; {func}`~numeraire.core.engine.backtest_forecast`,
+{func}`~numeraire.core.engine.backtest_panel` and {func}`~numeraire.core.engine.backtest_pricing`
+are its siblings.
 
 The return value is a {class}`~numeraire.core.engine.WeightsOutput` — a frozen container carrying
 the realised `weights` and `realized` panels plus the provenance every result row needs:
@@ -133,8 +141,8 @@ curve = StrategyReturnEvaluator().evaluate(result)   # one row per date, metric=
 
 ## 5. A forecast example
 
-Forecasting methods advertise the `to_forecast` capability and run through
-{func}`~numeraire.core.engine.walk_forward_forecast`, which uses the forecast-origin convention: at
+Forecasting methods advertise the `to_forecast` capability; `backtest` dispatches them to
+{func}`~numeraire.core.engine.backtest_forecast`, which uses the forecast-origin convention: at
 each origin `t` the model is fit on data up to and including `t` and predicts the return over
 `(t, t+h]`. The engine records the realised return and, for free, the prevailing historical-mean
 benchmark — the Goyal–Welch reference the out-of-sample R² is measured against.
@@ -143,14 +151,14 @@ Here the bundled {class}`~numeraire.baselines.HistoricalMean` forecasts a single
 because it *is* the benchmark, its out-of-sample R² is zero by construction.
 
 ```python
-from numeraire import OOSR2Evaluator, walk_forward_forecast
+from numeraire import OutOfSampleR2Evaluator, backtest
 from numeraire.baselines import HistoricalMean
 
 market = returns[["asset_0"]]
 fview = TimeSeriesView(market, horizon=1)
-fout = walk_forward_forecast(HistoricalMean(), fview, min_train=60, method="historical_mean")
+fout = backtest(HistoricalMean(), fview, min_train=60, method="historical_mean")
 
-print(OOSR2Evaluator(benchmark="historical").evaluate(fout)[["metric", "value", "capability"]].to_string(index=False))
+print(OutOfSampleR2Evaluator(benchmark="historical").evaluate(fout)[["metric", "value", "capability"]].to_string(index=False))
 ```
 
 ```text

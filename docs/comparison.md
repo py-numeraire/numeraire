@@ -64,7 +64,7 @@ returns are scored against the same sample. Every row it emits is tagged `protoc
 in-sample cross-sectional R² is an *explanatory* number: it says how well the model fits, not how
 well it would have predicted.
 
-For the **out-of-sample** counterpart, run {func}`~numeraire.core.engine.walk_forward_pricing` on
+For the **out-of-sample** counterpart, run {func}`~numeraire.core.engine.backtest_pricing` on
 each method directly. It refits at every fold on that fold's point-in-time window and pools the
 per-fold cross-sections into a `PricingOutput` tagged `protocol="walk_forward"`. The same evaluators
 apply; only the discipline — and therefore the meaning of the number — differs.

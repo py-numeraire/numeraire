@@ -56,7 +56,7 @@ The base install is the spine plus the native evaluators; optional integrations 
 import numpy as np
 import pandas as pd
 
-from numeraire import SharpeEvaluator, TimeSeriesView, WalkForwardSplitter, walk_forward
+from numeraire import SharpeEvaluator, TimeSeriesView, WalkForwardSplitter, backtest
 from numeraire.baselines import EqualWeight
 
 rng = np.random.default_rng(0)
@@ -64,8 +64,8 @@ dates = pd.date_range("2000-01-31", periods=120, freq="ME")
 returns = pd.DataFrame(rng.normal(0.01, 0.05, (120, 4)), index=dates, columns=list("ABCD"))
 
 view = TimeSeriesView(returns)
-result = walk_forward(EqualWeight(), view, WalkForwardSplitter(min_train=60, test_size=12),
-                      method="equal_weight")
+result = backtest(EqualWeight(), view, WalkForwardSplitter(min_train=60, test_size=12),
+                  method="equal_weight")
 print(SharpeEvaluator().evaluate(result)[["method", "metric", "value", "protocol"]])
 ```
 

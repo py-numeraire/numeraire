@@ -13,7 +13,7 @@ import pandas as pd
 from conftest import toy_panel_wide
 from numeraire.core import capabilities
 from numeraire.core.data import CharBlock, CrossSectionView
-from numeraire.core.engine import PanelWeightsOutput, walk_forward_panel
+from numeraire.core.engine import PanelWeightsOutput, backtest_panel
 from numeraire.core.splitter import WalkForwardSplitter
 
 
@@ -60,7 +60,7 @@ def _view() -> CrossSectionView:
 
 def test_walk_forward_panel_plumbing() -> None:
     v = _view()
-    out = walk_forward_panel(
+    out = backtest_panel(
         _XSEstimator(), v, WalkForwardSplitter(min_train=24, test_size=6), method="toy_fm"
     )
     assert isinstance(out, PanelWeightsOutput)
@@ -74,7 +74,7 @@ def test_walk_forward_panel_plumbing() -> None:
 
 def test_strategy_returns_are_per_date() -> None:
     v = _view()
-    out = walk_forward_panel(
+    out = backtest_panel(
         _XSEstimator(), v, WalkForwardSplitter(min_train=24, test_size=6), method="toy_fm"
     )
     sr = out.strategy_returns()
@@ -97,8 +97,8 @@ def test_model_weights_are_dollar_neutral_at_formation() -> None:
 def test_panel_backtest_is_deterministic() -> None:
     v = _view()
     sp = WalkForwardSplitter(min_train=24, test_size=6)
-    a = walk_forward_panel(_XSEstimator(), v, sp, method="toy_fm").strategy_returns()
-    b = walk_forward_panel(_XSEstimator(), v, sp, method="toy_fm").strategy_returns()
+    a = backtest_panel(_XSEstimator(), v, sp, method="toy_fm").strategy_returns()
+    b = backtest_panel(_XSEstimator(), v, sp, method="toy_fm").strategy_returns()
     np.testing.assert_array_equal(a.to_numpy(), b.to_numpy())
 
 
@@ -110,7 +110,7 @@ def test_walk_forward_panel_with_char_block_end_to_end() -> None:
     v = CrossSectionView(
         pan, chars=["size", "bm", "mom"], char_blocks=[CharBlock(extra, ["lagsize"], lag=1)]
     )
-    out = walk_forward_panel(
+    out = backtest_panel(
         _XSEstimator(), v, WalkForwardSplitter(min_train=24, test_size=6), method="toy_fm_cb"
     )
     assert isinstance(out, PanelWeightsOutput)

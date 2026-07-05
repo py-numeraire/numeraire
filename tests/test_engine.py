@@ -11,9 +11,9 @@ from numeraire.core.data import TimeSeriesView
 from numeraire.core.engine import (
     ForecastOutput,
     WeightsOutput,
+    backtest_forecast,
+    backtest_weights,
     config_hash,
-    walk_forward,
-    walk_forward_forecast,
 )
 from numeraire.core.splitter import WalkForwardSplitter
 
@@ -54,7 +54,7 @@ def test_config_hash_is_deterministic() -> None:
 def test_walk_forward_produces_aligned_output() -> None:
     v = make_monthly_view(n=120, n_assets=1, n_features=2, horizon=1, seed=7)
     sp = WalkForwardSplitter(min_train=60, test_size=12)
-    out = walk_forward(_OLSTimingEstimator(), v, sp, method="ols_timing", config={"h": 1})
+    out = backtest_weights(_OLSTimingEstimator(), v, sp, method="ols_timing", config={"h": 1})
 
     assert isinstance(out, WeightsOutput)
     assert out.capability == capabilities.TO_WEIGHTS
@@ -69,7 +69,7 @@ def test_walk_forward_produces_aligned_output() -> None:
 def test_strategy_returns_match_manual() -> None:
     v = make_monthly_view(n=90, horizon=1, seed=3)
     sp = WalkForwardSplitter(min_train=48, test_size=12)
-    out = walk_forward(_OLSTimingEstimator(), v, sp, method="ols_timing")
+    out = backtest_weights(_OLSTimingEstimator(), v, sp, method="ols_timing")
     sr = out.strategy_returns()
     manual = (out.weights.to_numpy() * out.realized.to_numpy()).sum(axis=1)
     np.testing.assert_allclose(sr.to_numpy(), manual)
@@ -78,7 +78,7 @@ def test_strategy_returns_match_manual() -> None:
 def test_horizon_aware_realized_uses_compounded_return() -> None:
     v = make_monthly_view(n=90, horizon=3, seed=1)
     sp = WalkForwardSplitter(min_train=48, test_size=12)
-    out = walk_forward(_OLSTimingEstimator(), v, sp, method="ols_timing")
+    out = backtest_weights(_OLSTimingEstimator(), v, sp, method="ols_timing")
     # each realized entry must equal the view's 3-period target for that date
     for t in out.realized.index:
         np.testing.assert_allclose(out.realized.loc[t].to_numpy(), v.target_asof(t, horizon=3))
@@ -102,7 +102,7 @@ class _MeanEstimator:
 
 def test_walk_forward_forecast_expanding_origin_alignment() -> None:
     v = make_monthly_view(n=60, n_assets=1, horizon=1, seed=2)
-    out = walk_forward_forecast(_MeanEstimator(), v, min_train=24, method="mean")
+    out = backtest_forecast(_MeanEstimator(), v, min_train=24, method="mean")
     assert isinstance(out, ForecastOutput)
     # expanding warm-up of 24, h=1 -> origins at index 23..58 -> 36 forecasts
     assert len(out.forecasts) == 36
@@ -114,7 +114,7 @@ def test_walk_forward_forecast_expanding_origin_alignment() -> None:
 
 def test_walk_forward_forecast_rolling_window_is_bounded() -> None:
     v = make_monthly_view(n=80, horizon=1, seed=5)
-    out = walk_forward_forecast(_MeanEstimator(), v, window=12, method="mean")
+    out = backtest_forecast(_MeanEstimator(), v, window=12, method="mean")
     # rolling 12, h=1 -> origins index 11..78 -> 68 forecasts; benchmark is the 12-obs mean
     assert len(out.forecasts) == 68
     assert out.forecasts.index.min() == v.calendar[11]

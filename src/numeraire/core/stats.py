@@ -6,13 +6,13 @@ Small, closed-form statistical tests the evaluator layer and reference-result te
   set of test assets (exact small-sample F under i.i.d. normal errors).
 - :func:`sharpe_diff_test` — Jobson-Korkie (1981) paired Sharpe-ratio difference z-test with the
   Memmel (2003) variance correction (the convention of the 1/N-style horse races).
-- :func:`clark_west` — Clark-West (2007) MSPE-adjusted test for nested forecast comparisons
+- :func:`clark_west_test` — Clark-West (2007) MSPE-adjusted test for nested forecast comparisons
   (the companion to the Goyal-Welch OOS R²; plain Diebold-Mariano is oversized for nested models).
 - :func:`alpha_regression` — time-series alpha vs a factor benchmark with HAC (Newey-West)
   standard errors (the volatility-managed-portfolio-style headline regression).
 - :func:`fama_macbeth` — Fama-MacBeth (1973) two-pass cross-sectional risk-premia estimation with
   FM t-statistics, optional Shanken (1992) errors-in-variables and Newey-West corrections.
-- :func:`adjust_tests` — multiple-testing adjustments for factor-zoo sweeps (Bonferroni, Holm,
+- :func:`adjust_pvalues` — multiple-testing adjustments for factor-zoo sweeps (Bonferroni, Holm,
   Benjamini-Yekutieli), the Harvey-Liu-Zhu (2016) toolbox behind the "t > 3.0" hurdle.
 - :func:`newey_west_lrv` — the shared Bartlett-kernel long-run variance helper.
 
@@ -32,7 +32,11 @@ outputs and the tidy result schema.
 
 from __future__ import annotations
 
+import functools
+import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import ParamSpec, TypeVar
 
 import numpy as np
 import pandas as pd
@@ -40,6 +44,28 @@ from numpy.typing import NDArray
 from scipy import stats as _sps
 
 from numeraire.core.data import Float
+
+_P = ParamSpec("_P")
+_RT = TypeVar("_RT")
+
+
+def _deprecated_alias(replacement: Callable[_P, _RT], *, old: str, new: str) -> Callable[_P, _RT]:
+    """Thin forwarder to ``replacement`` that emits a ``DeprecationWarning`` naming ``new``.
+
+    Keeps a renamed public function working for one release (non-breaking). Signature and return
+    type are preserved for type-checkers via ``ParamSpec``.
+    """
+
+    @functools.wraps(replacement)
+    def _alias(*args: _P.args, **kwargs: _P.kwargs) -> _RT:
+        warnings.warn(
+            f"{old}() is deprecated and will be removed in a future release; use {new}() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return replacement(*args, **kwargs)
+
+    return _alias
 
 
 def newey_west_lrv(x: Float, lags: int = 0) -> float:
@@ -76,7 +102,7 @@ class MultipleTestResult:
     adjusted_p: Float
 
 
-def adjust_tests(
+def adjust_pvalues(
     p_values: Float, *, method: str = "bhy", alpha: float = 0.05
 ) -> MultipleTestResult:
     """Multiple-testing adjustment for a family of tests (Harvey-Liu-Zhu 2016 §4.4 toolbox).
@@ -233,7 +259,7 @@ class ClarkWestResult:
     n_obs: int
 
 
-def clark_west(
+def clark_west_test(
     realized: Float, forecast: Float, benchmark: Float, *, nw_lags: int = 0
 ) -> ClarkWestResult:
     """Clark-West (2007) MSPE-adjusted test for nested models.
@@ -497,3 +523,8 @@ def performance_fee(candidate: Float, benchmark: Float, gamma: float) -> float:
     if disc < 0:
         return float("nan")
     return (-a + float(np.sqrt(disc))) / gamma
+
+
+# --- deprecated aliases (one release) ---
+adjust_tests = _deprecated_alias(adjust_pvalues, old="adjust_tests", new="adjust_pvalues")
+clark_west = _deprecated_alias(clark_west_test, old="clark_west", new="clark_west_test")

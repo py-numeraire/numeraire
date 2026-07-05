@@ -11,8 +11,8 @@ from numeraire.core import capabilities
 from numeraire.core.data import CrossSectionView, TimeSeriesView
 from numeraire.core.engine import (
     PricingOutput,
-    pricing_in_sample,
-    walk_forward_pricing,
+    backtest_pricing,
+    backtest_pricing_in_sample,
 )
 from numeraire.core.evaluators import (
     AverageAbsAlphaEvaluator,
@@ -85,7 +85,7 @@ def test_walk_forward_pricing_pooled_panels() -> None:
 
     v = _ts_view()
     sp = WalkForwardSplitter(min_train=24, test_size=12)
-    out = walk_forward_pricing(_TSPricing(), v, sp, method="ts_pricer", config={"h": 1})
+    out = backtest_pricing(_TSPricing(), v, sp, method="ts_pricer", config={"h": 1})
     assert isinstance(out, PricingOutput)
     assert out.capability == capabilities.TO_PRICING
     assert out.protocol == "walk_forward"
@@ -99,7 +99,7 @@ def test_walk_forward_pricing_pooled_panels() -> None:
 
 def test_pricing_in_sample_labels_protocol() -> None:
     v = _ts_view()
-    out = pricing_in_sample(_TSPricing(), v, method="ts_pricer")
+    out = backtest_pricing_in_sample(_TSPricing(), v, method="ts_pricer")
     assert out.protocol == "in_sample"
     assert not out.predicted.empty
     # a single full-sample fit broadcasts one row -> all prediction rows identical
@@ -113,7 +113,7 @@ def test_walk_forward_pricing_on_cross_section() -> None:
     panel = toy_panel_wide(n_months=48, n_assets=8, seed=9)
     v = CrossSectionView(panel, chars=["size", "bm", "mom"], horizon=1)
     sp = WalkForwardSplitter(min_train=24, test_size=12)
-    out = walk_forward_pricing(_CSPricing(), v, sp, method="cs_pricer")
+    out = backtest_pricing(_CSPricing(), v, sp, method="cs_pricer")
     assert isinstance(out, PricingOutput)
     assert out.protocol == "walk_forward"
     assert not out.predicted.empty
@@ -136,7 +136,7 @@ def test_walk_forward_pricing_rejects_non_pricing_model() -> None:
     v = _ts_view(n=40)
     sp = WalkForwardSplitter(min_train=20, test_size=10)
     with pytest.raises(TypeError, match="does not support 'to_pricing'"):
-        walk_forward_pricing(_NotPricing(), v, sp, method="bad")
+        backtest_pricing(_NotPricing(), v, sp, method="bad")
 
 
 # -- evaluators -----------------------------------------------------------------
@@ -247,14 +247,14 @@ def test_walk_forward_pricing_empty_when_nothing_priced() -> None:
 
     v = _ts_view(n=40)
     sp = WalkForwardSplitter(min_train=20, test_size=10)
-    out = walk_forward_pricing(_EmptyPricing(), v, sp, method="empty")
+    out = backtest_pricing(_EmptyPricing(), v, sp, method="empty")
     assert out.predicted.empty
     assert list(out.predicted.columns) == v.assets
 
 
 def test_pricing_in_sample_empty_when_nothing_priced() -> None:
     v = _ts_view(n=40)
-    out = pricing_in_sample(_EmptyPricing(), v, method="empty")
+    out = backtest_pricing_in_sample(_EmptyPricing(), v, method="empty")
     assert out.predicted.empty
     assert out.protocol == "in_sample"
 
@@ -279,7 +279,7 @@ def test_pricing_realized_and_finalize_helpers() -> None:
 
 def test_protocol_column_in_schema_and_existing_rows_walk_forward() -> None:
     assert "protocol" in RESULT_COLUMNS
-    # a weights output (no protocol field) reports the intrinsic walk_forward protocol
+    # a weights output (no protocol field) reports the intrinsic "walk_forward" protocol
     from numeraire.core.engine import WeightsOutput
     from numeraire.core.evaluators import SharpeEvaluator
 

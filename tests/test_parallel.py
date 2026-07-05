@@ -16,9 +16,9 @@ from numeraire.core.engine import (
     _even_chunks,
     _map_folds,
     _resolve_workers,
-    walk_forward,
-    walk_forward_forecast,
-    walk_forward_panel,
+    backtest_forecast,
+    backtest_panel,
+    backtest_weights,
 )
 from numeraire.core.splitter import WalkForwardSplitter
 
@@ -125,8 +125,8 @@ def test_resolve_workers() -> None:
 def test_walk_forward_parallel_matches_serial() -> None:
     v = make_monthly_view(n=180, n_features=2, seed=7)
     sp = WalkForwardSplitter(min_train=60, test_size=12)
-    serial = walk_forward(_OLSTimingEstimator(), v, sp, method="ols")
-    parallel = walk_forward(_OLSTimingEstimator(), v, sp, method="ols", n_jobs=4)
+    serial = backtest_weights(_OLSTimingEstimator(), v, sp, method="ols")
+    parallel = backtest_weights(_OLSTimingEstimator(), v, sp, method="ols", n_jobs=4)
     pd.testing.assert_frame_equal(serial.weights, parallel.weights)
     pd.testing.assert_frame_equal(serial.realized, parallel.realized)
     np.testing.assert_array_equal(
@@ -136,8 +136,8 @@ def test_walk_forward_parallel_matches_serial() -> None:
 
 def test_walk_forward_forecast_parallel_matches_serial() -> None:
     v = make_monthly_view(n=90, n_assets=1, seed=2)
-    serial = walk_forward_forecast(_MeanEstimator(), v, min_train=24, method="mean")
-    parallel = walk_forward_forecast(_MeanEstimator(), v, min_train=24, method="mean", n_jobs=-1)
+    serial = backtest_forecast(_MeanEstimator(), v, min_train=24, method="mean")
+    parallel = backtest_forecast(_MeanEstimator(), v, min_train=24, method="mean", n_jobs=-1)
     pd.testing.assert_frame_equal(serial.forecasts, parallel.forecasts)
     pd.testing.assert_frame_equal(serial.realized, parallel.realized)
     pd.testing.assert_frame_equal(serial.benchmark, parallel.benchmark)
@@ -146,7 +146,7 @@ def test_walk_forward_forecast_parallel_matches_serial() -> None:
 def test_walk_forward_panel_parallel_matches_serial() -> None:
     v = CrossSectionView(toy_panel_wide(), chars=["size", "bm", "mom"], horizon=1)
     sp = WalkForwardSplitter(min_train=24, test_size=6)
-    serial = walk_forward_panel(_XSEstimator(), v, sp, method="fm")
-    parallel = walk_forward_panel(_XSEstimator(), v, sp, method="fm", n_jobs=3)
+    serial = backtest_panel(_XSEstimator(), v, sp, method="fm")
+    parallel = backtest_panel(_XSEstimator(), v, sp, method="fm", n_jobs=3)
     pd.testing.assert_series_equal(serial.weights, parallel.weights)
     pd.testing.assert_series_equal(serial.realized, parallel.realized)

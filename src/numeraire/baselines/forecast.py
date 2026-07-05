@@ -2,7 +2,8 @@
 
 The prevailing (expanding) historical mean of the returns block is the benchmark every predictive
 regression is scored against: Goyal-Welch (2008) show it is a stubbornly hard forecast to beat out
-of sample, and the OOS R^2 in :class:`~numeraire.core.evaluators.OOSR2Evaluator` measures MSE
+of sample, and the OOS R^2 in :class:`~numeraire.core.evaluators.OutOfSampleR2Evaluator` measures
+MSE
 improvement *relative to it*. The walk-forward forecast engine already computes exactly this
 benchmark column for free at each origin (``train.returns_frame().mean(axis=0)``); this estimator
 exposes the very same quantity as a first-class ``to_forecast`` citizen, so it can be compared,

@@ -10,6 +10,6 @@
    :toctree: generated
    :nosignatures:
 
-   make_sorts
+   sort_portfolios
    SortResult
 ```

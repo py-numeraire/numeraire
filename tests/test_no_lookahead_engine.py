@@ -3,7 +3,7 @@
 The strongest PIT guard through the actual engines: a decision at date t is fit on data <= its
 fold's cutoff and formed from features_asof(t) <= t, so scrambling everything after a cut must leave
 every weight before the cut bit-for-bit identical (only the realized P&L, which uses future returns,
-may change). Covers both walk_forward (time-series) and walk_forward_panel (ragged cross-section).
+may change). Covers both backtest_weights (time-series) and backtest_panel (ragged cross-section).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import pandas as pd
 from conftest import toy_market, toy_panel_wide, toy_predictors
 from numeraire.core import capabilities
 from numeraire.core.data import CrossSectionView, TimeSeriesView
-from numeraire.core.engine import walk_forward, walk_forward_panel
+from numeraire.core.engine import backtest_panel, backtest_weights
 from numeraire.core.splitter import WalkForwardSplitter
 
 
@@ -78,7 +78,7 @@ def test_walk_forward_weights_invariant_to_future_corruption() -> None:
     mkt, rf = toy_market()
     pred = toy_predictors()
     sp = WalkForwardSplitter(min_train=24, test_size=6)
-    base = walk_forward(_OLS(), TimeSeriesView(mkt, pred, risk_free=rf), sp, method="x").weights
+    base = backtest_weights(_OLS(), TimeSeriesView(mkt, pred, risk_free=rf), sp, method="x").weights
 
     cut = pd.Timestamp("2004-01-31")
     rng = np.random.default_rng(999)
@@ -86,7 +86,7 @@ def test_walk_forward_weights_invariant_to_future_corruption() -> None:
     fut = mkt2.index >= cut
     mkt2.loc[fut, "mkt"] = rng.normal(0.0, 5.0, int(fut.sum()))
     pred2.loc[fut, :] = rng.normal(0.0, 50.0, (int(fut.sum()), pred2.shape[1]))
-    corrupt = walk_forward(
+    corrupt = backtest_weights(
         _OLS(), TimeSeriesView(mkt2, pred2, risk_free=rf), sp, method="x"
     ).weights
 
@@ -98,7 +98,7 @@ def test_walk_forward_weights_invariant_to_future_corruption() -> None:
 def test_walk_forward_panel_weights_invariant_to_future_corruption() -> None:
     pan = toy_panel_wide()
     sp = WalkForwardSplitter(min_train=24, test_size=6)
-    base = walk_forward_panel(
+    base = backtest_panel(
         _XS(), CrossSectionView(pan, chars=["size", "bm", "mom"]), sp, method="p"
     ).weights
 
@@ -108,7 +108,7 @@ def test_walk_forward_panel_weights_invariant_to_future_corruption() -> None:
     fut = pan2["date"] >= cut
     for col in ("size", "bm", "mom", "ret"):
         pan2.loc[fut, col] = rng.normal(0.0, 50.0, int(fut.sum()))
-    corrupt = walk_forward_panel(
+    corrupt = backtest_panel(
         _XS(), CrossSectionView(pan2, chars=["size", "bm", "mom"]), sp, method="p"
     ).weights
 

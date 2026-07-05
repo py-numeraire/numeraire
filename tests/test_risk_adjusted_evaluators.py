@@ -26,10 +26,10 @@ from numeraire import (
     WalkForwardSplitter,
     WeightsOutput,
     available_evaluators,
+    backtest_weights,
     capabilities,
     get_evaluator,
     validate_result,
-    walk_forward,
 )
 from numeraire.baselines import EqualWeight
 
@@ -326,7 +326,7 @@ def test_weights_evaluators_run_through_engine() -> None:
     view = make_monthly_view(n=48, n_assets=4, seed=9)
     n = len(view.calendar)
     sp = WalkForwardSplitter(min_train=24, test_size=n - 24, expanding=True)
-    out = walk_forward(EqualWeight(), view, sp, method="equal_weight")
+    out = backtest_weights(EqualWeight(), view, sp, method="equal_weight")
     bench = out.strategy_returns() * 0.5  # a trivial benchmark series on the same calendar
     factors = view.returns_frame().rename(columns={view.assets[0]: "mkt"})[["mkt"]]
     for ev in (
