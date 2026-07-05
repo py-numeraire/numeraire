@@ -36,8 +36,16 @@ skfolio = ["skfolio>=0.5"]
 
 # Methods bundled in the repo register themselves via entry points (open registry).
 # External packages (numeraire-yourlab, numeraire-<method>) register the same way.
+# The universal baselines dogfood the discovery mechanism (snake + CamelCase names).
 [project.entry-points."numeraire.methods"]
-# (none yet — methods land here as they are wired in)
+equal_weight = "numeraire.baselines:EqualWeight"
+EqualWeight = "numeraire.baselines:EqualWeight"
+min_variance = "numeraire.baselines:MinVariance"
+MinVariance = "numeraire.baselines:MinVariance"
+mean_variance = "numeraire.baselines:MeanVariance"
+MeanVariance = "numeraire.baselines:MeanVariance"
+historical_mean = "numeraire.baselines:HistoricalMean"
+HistoricalMean = "numeraire.baselines:HistoricalMean"
 
 [project.urls]
 Homepage = "https://github.com/py-numeraire/numeraire"
@@ -58,7 +66,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "NPY", "PD", "RUF"]
 
 [tool.basedpyright]
 typeCheckingMode = "strict"
-include = ["src/numeraire/core"]
+include = ["src/numeraire/core", "src/numeraire/baselines"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -73,12 +81,13 @@ root_package = "numeraire"
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
-name = "core must not depend on methods, adapters, or reference libraries"
+name = "core must not depend on methods, adapters, baselines, or reference libraries"
 type = "forbidden"
 source_modules = ["numeraire.core"]
 forbidden_modules = [
   "numeraire.methods",
   "numeraire.adapters",
+  "numeraire.baselines",
 ]
 
 [dependency-groups]

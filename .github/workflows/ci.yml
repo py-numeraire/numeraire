@@ -15,8 +15,8 @@ jobs:
       - run: uv sync --extra dev
       - name: Lint & format
         run: uv run ruff check . && uv run ruff format --check .
-      - name: Type check (core, strict)
-        run: uv run basedpyright src/numeraire/core
+      - name: Type check (core + baselines, strict)
+        run: uv run basedpyright src/numeraire/core src/numeraire/baselines
       - name: Architecture boundary
         run: uv run lint-imports
       - name: Tests
