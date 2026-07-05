@@ -5,6 +5,12 @@ train view and asks the fitted model for its capability output on the test view,
 realized P&L **from the original full view** so the model never touches future returns. Output
 is one tidy container carrying the preprocessing/vintage provenance every result row needs
 (``config_hash`` + ``data_vintage``).
+
+Naming convention: ``*Output`` classes (``WeightsOutput``, ``ForecastOutput``, ``PricingOutput``,
+``PanelWeightsOutput``) are the engine's capability *artifacts* — the OOS panels an ``Evaluator``
+consumes to produce result rows. ``*Result`` classes elsewhere (``SimulationResult``,
+``SortResult``, the ``stats`` ``*Result`` records) are the return values of one-shot computations.
+If it feeds an evaluator it is an ``Output``; if it is a computed answer it is a ``Result``.
 """
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ import warnings
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, ParamSpec, TypeVar
+from typing import Any, ParamSpec, TypeVar, cast
 
 import numpy as np
 import pandas as pd
@@ -262,7 +268,13 @@ def backtest_forecast(
         for j in block:
             origin = cal[j]
             train = _train_at(j)
-            f = model.forecast(train)
+            # Reindex the forecast to ``view.assets`` order so it pairs BY LABEL with the realized
+            # target and the benchmark (both built in ``view.assets`` order); a forecast Series
+            # whose index is permuted relative to ``view.assets`` would otherwise be scored
+            # positionally against the wrong asset's realized return. Index labels are str-normed
+            # first (the shape contract str-maps the forecast index) so a str-match still aligns.
+            fc = model.forecast(train)
+            f = fc.set_axis([str(i) for i in fc.index]).reindex(assets)
             bench = train.returns_frame().to_numpy(dtype=np.float64).mean(axis=0)
             rows.append(
                 (origin, f.to_numpy(dtype=np.float64), bench, view.target_asof(origin, horizon=h))
@@ -342,6 +354,17 @@ def backtest_weights(
         w = model.to_weights(test)
         if w.empty:
             return None
+        # Reindex to the canonical ``view.assets`` order so the model's returned columns pair with
+        # ``realized`` (built in ``view.assets`` order) BY LABEL, not by position. A model that
+        # returns weight columns permuted or subset relative to ``view.assets`` would otherwise be
+        # silently mis-scored downstream (``strategy_returns`` multiplies positionally by column).
+        # Assets the model omits become NaN and drop out of the ``nansum`` P&L consistently with the
+        # existing unrealized-tail handling. (The wide path expects a DataFrame; the panel path,
+        # which handles a long Series, is ``backtest_panel``.) Column labels are str-normed first so
+        # a model whose columns only str-match ``view.assets`` (the shape contract str-maps) aligns.
+        wide = cast("pd.DataFrame", w)
+        wide = wide.set_axis([str(c) for c in wide.columns], axis=1)
+        w = wide.reindex(columns=assets)
         realized = np.vstack([view.target_asof(t) for t in w.index])
         # Drop prediction dates whose target is not yet realized in-sample (the unrealized
         # tail near the end of data) — they cannot be scored without look-ahead.
@@ -702,12 +725,27 @@ def backtest(
         )
     (cap,) = caps
 
+    if cap == capabilities.TO_FORECAST:
+        # The forecast route is windowed by ``min_train`` / ``window``, not a splitter. A splitter
+        # here is a caller mistake — surface it rather than silently ignore the argument.
+        if splitter is not None:
+            raise TypeError(
+                f"{method}: forecast backtests use `min_train`/`window`, not a splitter; "
+                "drop the splitter argument"
+            )
+        return backtest_forecast(estimator, view, method=method, **kwargs)
+
+    # The weights / panel / pricing routes are walk-forward and delegate to ``splitter.split``;
+    # a missing splitter would otherwise die with a cryptic ``AttributeError`` on ``None``.
+    if splitter is None:
+        raise TypeError(
+            f"{method}: this walk-forward backtest requires a `splitter` "
+            "(e.g. WalkForwardSplitter); got splitter=None"
+        )
     if cap == capabilities.TO_WEIGHTS:
         if isinstance(view, CrossSectionView):
             return backtest_panel(estimator, view, splitter, method=method, **kwargs)
         return backtest_weights(estimator, view, splitter, method=method, **kwargs)
-    if cap == capabilities.TO_FORECAST:
-        return backtest_forecast(estimator, view, method=method, **kwargs)
     return backtest_pricing(estimator, view, splitter, method=method, **kwargs)
 
 
