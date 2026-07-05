@@ -144,6 +144,7 @@ def test_zero_band_demands_exact_match() -> None:
         ({"expected": {}}, "at least one metric"),
         ({"tolerance": {"nope": 0.1}}, "non-expected metrics"),
         ({"name": ""}, "must be non-empty"),
+        ({"expected": {"r2": 3.51}}, "zero tolerance band but a non-integer"),
     ],
 )
 def test_post_init_validation(kwargs: dict[str, object], match: str) -> None:
