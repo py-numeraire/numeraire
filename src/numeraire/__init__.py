@@ -6,7 +6,14 @@ never the reverse (enforced by import-linter, see pyproject ``[tool.importlinter
 """
 
 from numeraire.core import capabilities
-from numeraire.core.data import CrossSectionView, TimeSeriesView
+from numeraire.core.data import (
+    CharBlock,
+    CrossSectionView,
+    FeatureBlock,
+    PanelTensor,
+    TimeSeriesView,
+    VintagedBlock,
+)
 from numeraire.core.engine import (
     ForecastOutput,
     PanelWeightsOutput,
@@ -83,6 +90,7 @@ __all__ = [
     "AlphaEvaluator",
     "AverageAbsAlphaEvaluator",
     "CEQEvaluator",
+    "CharBlock",
     "ClarkWestEvaluator",
     "CrossSectionView",
     "CrossSectionalR2Evaluator",
@@ -90,6 +98,7 @@ __all__ = [
     "Estimator",
     "Evaluator",
     "ExposureEvaluator",
+    "FeatureBlock",
     "ForecastOutput",
     "ICEvaluator",
     "InformationRatioEvaluator",
@@ -98,6 +107,7 @@ __all__ = [
     "Model",
     "OOSR2Evaluator",
     "OutOfSampleR2Evaluator",
+    "PanelTensor",
     "PanelWeightsOutput",
     "PricingOutput",
     "RebalanceSchedule",
@@ -113,6 +123,7 @@ __all__ = [
     "SupportsWeights",
     "TimeSeriesView",
     "TreynorEvaluator",
+    "VintagedBlock",
     "WalkForwardSplitter",
     "WeightsOutput",
     "adjust_pvalues",

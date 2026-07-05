@@ -74,12 +74,14 @@ __all__ = [
     "check_engine_roundtrip",
     "check_estimator",
     "check_no_lookahead",
+    "check_output_shapes",
 ]
 
 ViewFactory = Callable[[], Any]
 
-# The capabilities whose method surface has crystallized (SupportsWeights / SupportsForecast) and
-# the method each mandates. ``to_pricing`` is deliberately absent — it has no frozen method yet.
+# The capabilities whose method surface has crystallized and the method each mandates. All three
+# dispatchable capabilities are now crystallized: ``to_pricing`` mandates ``expected_returns``
+# (SupportsPricing), joining ``to_weights`` and ``to_forecast`` (Supports Weights / Forecast).
 _CRYSTALLIZED: dict[str, str] = {
     capabilities.TO_WEIGHTS: "to_weights",
     capabilities.TO_FORECAST: "forecast",
@@ -222,6 +224,11 @@ def check_output_shapes(estimator: Any, view_factory: ViewFactory) -> None:
         w = _weights(model, view)
         if isinstance(w, pd.DataFrame):
             assert set(map(str, w.columns)) <= assets, "weights columns must be ⊆ view.assets"
+            # Duplicate column labels make the engine's label-based realized-return alignment
+            # (``reindex(columns=view.assets)``) ambiguous — reject them up front.
+            assert w.columns.is_unique, (
+                "weights columns must be unique labels (duplicates break realized-return alignment)"
+            )
             assert set(w.index) <= set(view.calendar), "weights index must be ⊆ view.calendar"
         else:  # panel: long (date, asset) Series
             assert isinstance(w.index, pd.MultiIndex), "panel weights need a MultiIndex"
@@ -232,10 +239,16 @@ def check_output_shapes(estimator: Any, view_factory: ViewFactory) -> None:
         d = view.calendar[_origin_index(view)]
         f = model.forecast(view.window(d))
         assert isinstance(f, pd.Series), "forecast must return a pd.Series"
+        assert f.index.is_unique, (
+            "forecast index must be unique labels (duplicates break realized-return alignment)"
+        )
         assert [str(i) for i in f.index] == view.assets, "forecast index must equal view.assets"
     if capabilities.TO_PRICING in caps:
         p = _expected_returns(model, view)
         assert set(map(str, p.columns)) <= assets, "expected_returns columns must be ⊆ view.assets"
+        assert p.columns.is_unique, (
+            "expected_returns columns must be unique labels (duplicates break alignment)"
+        )
         assert set(p.index) <= set(view.calendar), "expected_returns index must be ⊆ view.calendar"
 
 
@@ -243,7 +256,7 @@ def check_determinism(estimator: Any, view_factory: ViewFactory) -> None:
     """Same estimator + same (deterministic) view ⇒ bit-identical extractable output, twice."""
     ext = _extractable(_caps(_fit(estimator, view_factory())))
     if not ext:
-        return  # capability-only method (e.g. to_pricing): no crystallized surface to compare
+        return  # capability-only method (e.g. to_density / to_surface): no crystallized surface
     m1 = _fit(estimator, view_factory())
     m2 = _fit(estimator, view_factory())
     if capabilities.TO_WEIGHTS in ext:

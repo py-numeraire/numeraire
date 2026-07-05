@@ -33,8 +33,18 @@ class Model(Protocol):
     """A fitted model. Exposes whatever capabilities it has — capabilities, not mandatory methods.
 
     Optional, dispatched by capability (do NOT make these mandatory):
-    ``to_weights(view) -> pd.DataFrame``, ``expected_returns(view) -> pd.DataFrame``,
+    ``to_weights(view) -> pd.DataFrame | pd.Series``, ``expected_returns(view) -> pd.DataFrame``,
     ``to_density(view)``, ``to_surface(view)``, ...
+
+    Capability → method-name mapping (the three crystallized surfaces follow *different* naming
+    patterns, so an extension author must map deliberately, not by rote):
+
+    - ``capabilities.TO_WEIGHTS`` → ``to_weights()``
+    - ``capabilities.TO_FORECAST`` → ``forecast()`` (**not** ``to_forecast``)
+    - ``capabilities.TO_PRICING`` → ``expected_returns()`` (**not** ``to_pricing``)
+
+    A model declaring a capability must expose its mapped method; the conformance suite
+    (``numeraire.testing.check_capabilities``) enforces this.
     """
 
     def capabilities(self) -> set[str]:
@@ -51,8 +61,15 @@ class SupportsWeights(Protocol):
     layer crystallizes once the third real adapter lands.
     """
 
-    def to_weights(self, view: DataView) -> pd.DataFrame:
-        """Return ``(date x asset)`` weights for each date in ``view.calendar``."""
+    def to_weights(self, view: DataView) -> pd.DataFrame | pd.Series:
+        """Return per-date weights for each date in ``view.calendar``.
+
+        A fixed-universe time-series method returns a wide ``(date x asset)`` ``pd.DataFrame``; a
+        cross-sectional (ragged / entering-exiting universe) method returns a long ``pd.Series`` on
+        a ``(date, asset)`` MultiIndex — the panel engine (``backtest_panel``) accepts that form
+        (or an equivalent one-column frame). Either way the engine aligns the returned labels to
+        realized returns before scoring, so column / row order need not be canonical.
+        """
         ...
 
 
