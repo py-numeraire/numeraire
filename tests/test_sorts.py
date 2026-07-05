@@ -2,7 +2,7 @@
 
 Synthetic, mechanical checks — a panel with a known signal produces known bin assignments and
 weighted returns; the NYSE-breakpoint path is checked to move the cutoffs (so small non-NYSE names
-don't set them). The French/WRDS decile cross-check rides the WRDS-CRED golden tier (W3-4).
+don't set them). The French/WRDS decile cross-check rides the credentialed reference tier (W3-4).
 """
 
 from __future__ import annotations

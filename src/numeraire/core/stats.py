@@ -1,6 +1,6 @@
 """Inference primitives for asset-pricing evaluation (pure numpy/scipy, no heavy deps).
 
-Small, closed-form statistical tests the evaluator layer and golden tests build on:
+Small, closed-form statistical tests the evaluator layer and reference-result tests build on:
 
 - :func:`grs_test` — Gibbons-Ross-Shanken (1989) joint zero-alpha F-test of a factor model on a
   set of test assets (exact small-sample F under i.i.d. normal errors).

@@ -1,30 +1,39 @@
-"""GoldenCase registry — reproduction targets as first-class, tiered data records.
+"""ReferenceResult registry — reproduction targets as first-class, tiered data records.
 
-A :class:`GoldenCase` pins a *published* result — an exact paper, venue, table, and paper
+A :class:`ReferenceResult` pins a *published* result — an exact paper, venue, table, and paper
 version — to an ``expected`` metric dict plus a per-metric ``tolerance`` band on a named dataset,
-tagged by **data tier**:
+tagged by a **data-access tier**.
 
-- :data:`PUBLIC_CI` — redistributable public/synthetic data; runs in CI unconditionally.
-- :data:`WRDS_CRED` — needs licensed data behind the user's own credentials (CRSP/Compustat via a
-  connector); skipped unless the credentials/data are reachable.
-- :data:`LAB_ONLY` — needs non-redistributable data at a local path (e.g. CC-BY-NC returns that may
-  never be committed); skipped unless the file is present.
+The tier axis is a **DATA-ACCESS REQUIREMENT**, never a statement of importance or rank:
 
-Needing licensed data does **not** disqualify a reproduction target. The tier plus an optional
-``available`` predicate let CI stay green on public data while the *same* case runs verbatim
-wherever the private data is present — the connector pattern, one code path, no forked assertions.
+- :data:`PUBLIC` — public/redistributable (or synthetic) data; the case runs unconditionally,
+  including in CI.
+- :data:`CREDENTIALED` — data that is programmatically fetchable with the user's *own* subscription
+  credentials (e.g. CRSP/Compustat through a connector); the case self-skips when those credentials
+  are absent.
+- :data:`RESTRICTED` — data that anyone may obtain but that is non-redistributable, so it needs a
+  self-obtained local copy (e.g. CC-BY-NC returns that may never be committed); the case self-skips
+  when that local copy is absent.
+
+Tiers never encode importance or rank — a reproduction that needs licensed or restricted data is a
+**first-class citizen**. The tier plus an optional ``available`` predicate let CI stay green on
+public data while the *same* case runs verbatim wherever the private data is present — the connector
+pattern, one code path, no forked assertions.
+
+(Disambiguation: a "reference result" here is a *pinned published number*; it is unrelated to the
+"reference libraries" — ``ipca`` / ``linearmodels`` — mentioned elsewhere in the project.)
 
 This module is **core infrastructure, not a method** — it is exempt from the boundary rule's
 methods/adapters import ban (it lives in ``numeraire`` proper, not ``numeraire.core``, and imports
 only the standard library). The registry is process-global and open: ``numeraire`` ships a couple of
-its own goldens and any downstream package (``numeraire-zoo``, ``numeraire-yourlab``) registers its
-reproduction targets the same way, then a single parametrized test drives them all
-(:func:`golden_params`).
+its own references and any downstream package (``numeraire-zoo``, ``numeraire-yourlab``) registers
+its reproduction targets the same way, then a single parametrized test drives them all
+(:func:`reference_params`).
 
-The tolerance philosophy is the framework's: a golden asserts an **invariant plus a headline scalar
-within a band**, never bit-equality — bands absorb data-vintage revisions (French/GW live-data
-drift). :meth:`GoldenCase.check` enforces the band and rejects a non-finite computed value (an
-all-NaN false green).
+The tolerance philosophy is the framework's: a reference asserts an **invariant plus a headline
+scalar within a band**, never bit-equality — bands absorb data-vintage revisions (French/GW
+live-data drift). :meth:`ReferenceResult.check` enforces the band and rejects a non-finite computed
+value (an all-NaN false green).
 """
 
 from __future__ import annotations
@@ -39,17 +48,17 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 # --------------------------------------------------------------------------------- data tiers
 
-PUBLIC_CI = "PUBLIC-CI"
-"""Redistributable public or synthetic data — the case runs in CI unconditionally."""
+PUBLIC = "public"
+"""Public/redistributable or synthetic data — the case runs unconditionally, including in CI."""
 
-WRDS_CRED = "WRDS-CRED"
-"""Licensed data reachable through the user's own credentials — skipped when absent."""
+CREDENTIALED = "credentialed"
+"""Programmatically fetchable with the user's own subscription credentials — skipped when absent."""
 
-LAB_ONLY = "LAB-ONLY"
-"""Non-redistributable data at a local path (never committed) — skipped when absent."""
+RESTRICTED = "restricted"
+"""Non-redistributable data needing a self-obtained local copy (never committed); skipped absent."""
 
-DATA_TIERS: tuple[str, ...] = (PUBLIC_CI, WRDS_CRED, LAB_ONLY)
-"""The closed set of data tiers, from least to most access-restricted."""
+DATA_TIERS: tuple[str, ...] = (PUBLIC, CREDENTIALED, RESTRICTED)
+"""The closed set of data-access tiers, from least to most access-restricted."""
 
 # --------------------------------------------------------------------------------- status values
 
@@ -66,14 +75,14 @@ _STATUSES: frozenset[str] = frozenset({VERIFIED, VERIFIED_WITH_CAVEAT, UNVERIFIE
 
 
 @dataclass(frozen=True)
-class GoldenCase:
+class ReferenceResult:
     """A pinned, tiered reproduction target: a paper figure/table matched within a band.
 
     ``expected`` maps a metric name to the paper's value; ``tolerance`` maps a (subset of those)
     metric names to an absolute band — a metric absent from ``tolerance`` must match exactly
     (band ``0.0``, only sensible for integer counts). ``available`` is an optional zero-arg
     predicate: when it returns ``False`` the case is skipped (its data is out of reach on this
-    machine). ``PUBLIC_CI`` cases normally leave it ``None`` (always available).
+    machine). ``PUBLIC`` cases normally leave it ``None`` (always available).
     """
 
     name: str
@@ -83,7 +92,7 @@ class GoldenCase:
     table: str
     expected: Mapping[str, float]
     tolerance: Mapping[str, float] = field(default_factory=dict[str, float])
-    tier: str = PUBLIC_CI
+    tier: str = PUBLIC
     paper_version: str = "published"
     data: str = ""
     status: str = VERIFIED
@@ -92,7 +101,7 @@ class GoldenCase:
 
     def __post_init__(self) -> None:
         if not self.name:
-            raise ValueError("GoldenCase.name must be non-empty")
+            raise ValueError("ReferenceResult.name must be non-empty")
         if self.tier not in DATA_TIERS:
             raise ValueError(f"unknown data tier {self.tier!r}; expected one of {DATA_TIERS}")
         if self.status not in _STATUSES:
@@ -142,32 +151,32 @@ class GoldenCase:
 
 # --------------------------------------------------------------------------------- registry
 
-_CASES: dict[str, GoldenCase] = {}
+_CASES: dict[str, ReferenceResult] = {}
 
 
-def register_golden_case(case: GoldenCase, *, overwrite: bool = False) -> GoldenCase:
+def register_reference(case: ReferenceResult, *, overwrite: bool = False) -> ReferenceResult:
     """Register ``case`` under its ``name``. Raises on a duplicate name unless ``overwrite``.
 
     Returns the case so a module can register-and-bind in one line
-    (``FF2015 = register_golden_case(GoldenCase(...))``).
+    (``FF2015 = register_reference(ReferenceResult(...))``).
     """
     if not overwrite and case.name in _CASES:
-        raise KeyError(f"golden case {case.name!r} already registered")
+        raise KeyError(f"reference result {case.name!r} already registered")
     _CASES[case.name] = case
     return case
 
 
-def get_golden_case(name: str) -> GoldenCase:
-    """Return the golden case registered under ``name``."""
+def get_reference(name: str) -> ReferenceResult:
+    """Return the reference result registered under ``name``."""
     try:
         return _CASES[name]
     except KeyError:
-        raise KeyError(f"no golden case registered as {name!r}") from None
+        raise KeyError(f"no reference result registered as {name!r}") from None
 
 
-def golden_cases(
+def references(
     *, tier: str | None = None, available_only: bool = False
-) -> tuple[GoldenCase, ...]:
+) -> tuple[ReferenceResult, ...]:
     """Return registered cases, name-sorted, optionally filtered by ``tier`` / availability."""
     if tier is not None and tier not in DATA_TIERS:
         raise ValueError(f"unknown data tier {tier!r}; expected one of {DATA_TIERS}")
@@ -177,7 +186,7 @@ def golden_cases(
     return tuple(sorted(cases, key=lambda c: c.name))
 
 
-def clear_golden_cases() -> None:
+def clear_references() -> None:
     """Drop all registered cases (test-isolation helper; not for production paths)."""
     _CASES.clear()
 
@@ -185,28 +194,28 @@ def clear_golden_cases() -> None:
 # --------------------------------------------------------------------------------- pytest helper
 
 
-def golden_params(*, tier: str | None = None) -> list[ParameterSet]:
+def reference_params(*, tier: str | None = None) -> list[ParameterSet]:
     """Return ``pytest.param`` entries for registered cases, ready for ``@pytest.mark.parametrize``.
 
-    Each entry carries the :class:`GoldenCase` as its single argument and the case name as its id;
-    a case whose data is unavailable (:meth:`GoldenCase.is_available` is ``False``) carries a
-    ``pytest.mark.skip`` so a ``WRDS-CRED`` / ``LAB-ONLY`` target self-skips on a machine that lacks
-    the data instead of failing. ``pytest`` is imported lazily so this module stays import-clean at
-    runtime (the helper is only ever called from a test).
+    Each entry carries the :class:`ReferenceResult` as its single argument and the case name as its
+    id; a case whose data is unavailable (:meth:`ReferenceResult.is_available` is ``False``) carries
+    a ``pytest.mark.skip`` so a ``credentialed`` / ``restricted`` target self-skips on a machine
+    that lacks the data instead of failing. ``pytest`` is imported lazily so this module stays
+    import-clean at runtime (the helper is only ever called from a test).
 
     Usage::
 
         import pytest
-        from numeraire.golden import golden_params
+        from numeraire.reference import reference_params
 
-        @pytest.mark.parametrize("case", golden_params())
-        def test_golden(case):
+        @pytest.mark.parametrize("case", reference_params())
+        def test_reference(case):
             case.check(compute_metrics(case))
     """
     import pytest
 
     params: list[ParameterSet] = []
-    for case in golden_cases(tier=tier):
+    for case in references(tier=tier):
         marks = (
             ()
             if case.is_available()
