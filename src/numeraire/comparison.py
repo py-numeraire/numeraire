@@ -31,7 +31,13 @@ from typing import Any
 import pandas as pd
 
 from numeraire.core import capabilities
-from numeraire.core.engine import PricingOutput, config_hash
+from numeraire.core.data import CrossSectionView, TimeSeriesView
+from numeraire.core.engine import (
+    PricingOutput,
+    _finalize_pricing,  # pyright: ignore[reportPrivateUsage]  # engine-internal, shared in-package
+    _pricing_realized,  # pyright: ignore[reportPrivateUsage]  # engine-internal, shared in-package
+    config_hash,
+)
 from numeraire.core.evaluators import AverageAbsAlphaEvaluator, CrossSectionalR2Evaluator
 from numeraire.core.protocols import DataView, Estimator, Evaluator, SupportsPricing
 from numeraire.core.schema import validate_result
@@ -85,9 +91,20 @@ def _canonical_returns(test_assets: Any) -> pd.DataFrame:
 
 
 def _price_entry(
-    entry: ComparisonEntry, canonical: pd.DataFrame, *, data_vintage: str
+    entry: ComparisonEntry,
+    canonical: pd.DataFrame,
+    realized_source: Any,
+    *,
+    data_vintage: str,
 ) -> PricingOutput:
-    """Fit the entry, price the common test assets, and pair with canonical realized returns."""
+    """Fit the entry, price the common test assets, and pair with canonical realized returns.
+
+    ``realized_source`` is either a concrete core view (its own horizon-aware ``target_asof``
+    pairing resolves ``predicted.loc[t]`` against the return over ``(t, t+h]``, exactly like the
+    pricing drivers) or the pre-shifted ``(date x asset)`` frame built by :func:`compare` for a
+    bare panel (the horizon-1 convention). Either way the alignment convention of
+    :class:`~numeraire.core.engine.PricingOutput` is preserved — one class, one convention.
+    """
     model = entry.estimator.fit(entry.train_view)
     if capabilities.TO_PRICING not in model.capabilities() or not isinstance(
         model, SupportsPricing
@@ -113,7 +130,11 @@ def _price_entry(
             f"comparison entry {entry.name!r}: expected_returns has dates absent from the common "
             f"test_assets calendar ({list(stray_dates[:3])}...); test_view must share the calendar"
         )
-    realized = canonical.reindex(index=predicted.index, columns=predicted.columns)
+    if isinstance(realized_source, pd.DataFrame):
+        realized = realized_source.reindex(index=predicted.index, columns=predicted.columns)
+    else:
+        realized = _pricing_realized(realized_source, predicted)
+    predicted, realized = _finalize_pricing(predicted, realized)
     chash = config_hash(entry.config)
     return PricingOutput(
         predicted=predicted,
@@ -141,13 +162,21 @@ def compare(
     default evaluators are the two native pricing metrics (:class:`CrossSectionalR2Evaluator`,
     :class:`AverageAbsAlphaEvaluator`); pass an explicit list to add or narrow them.
 
+    Alignment convention (the :class:`~numeraire.core.engine.PricingOutput` invariant):
+    ``predicted.loc[t]`` prices the return realized over ``(t, t+h]``, exactly as in the pricing
+    drivers. When ``test_assets`` is a concrete core view, its own horizon-aware pairing
+    (``target_asof``) supplies the realized panel. When it is a bare ``(date x asset)`` frame,
+    **horizon 1 is assumed**: ``realized.loc[t]`` is the panel's next row (``panel.shift(-1)``) —
+    pass a view with the right ``horizon`` for multi-period targets. Prediction dates whose realized
+    cross-section is entirely unrealized (the horizon tail) are dropped, as in the drivers.
+
     Parameters
     ----------
     entries:
         The competitors (see :class:`ComparisonEntry`).
     test_assets:
-        The common realized-return panel — a ``(date x asset)`` DataFrame or any view exposing
-        ``returns_frame()``.
+        The common realized-return panel — a ``(date x asset)`` DataFrame (horizon-1 convention) or
+        a view exposing ``returns_frame()`` (its own horizon).
     evaluators:
         Evaluators to run on each entry's :class:`~numeraire.core.engine.PricingOutput`. Defaults to
         the native pricing pair.
@@ -170,9 +199,16 @@ def compare(
         ]
     )
     canonical = _canonical_returns(test_assets)
+    # Realized source, per the (t, t+h] convention: a concrete view resolves horizon-aware via the
+    # engine's own helper; a bare frame (or duck-typed view) uses the next-row (horizon-1) pairing.
+    realized_source: Any
+    if isinstance(test_assets, TimeSeriesView | CrossSectionView):
+        realized_source = test_assets
+    else:
+        realized_source = canonical.shift(-1)
     parts: list[pd.DataFrame] = []
     for entry in entries:
-        out = _price_entry(entry, canonical, data_vintage=data_vintage)
+        out = _price_entry(entry, canonical, realized_source, data_vintage=data_vintage)
         for ev in evals:
             parts.append(ev.evaluate(out))
     result = pd.concat(parts, ignore_index=True)

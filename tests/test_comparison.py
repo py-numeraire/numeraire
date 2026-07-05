@@ -80,6 +80,68 @@ def _cross_section_view(canonical: pd.DataFrame, seed: int = 3) -> CrossSectionV
     return CrossSectionView(pd.DataFrame(rows), chars=["c0", "c1"], horizon=1)
 
 
+class _ExactPricingModel:
+    """Prices each date's ``(t, t+h]`` return exactly (expected returns == realized returns)."""
+
+    def __init__(self, target: pd.DataFrame) -> None:
+        self._target = target  # indexed at t, holding the (t, t+1] realized return
+
+    def capabilities(self) -> set[str]:
+        return {capabilities.TO_PRICING}
+
+    def expected_returns(self, view: TimeSeriesView) -> pd.DataFrame:
+        return self._target.reindex(view.calendar)
+
+
+class _ExactPricing:
+    def __init__(self, target: pd.DataFrame) -> None:
+        self._target = target
+
+    def fit(self, view: TimeSeriesView) -> _ExactPricingModel:
+        _ = view
+        return _ExactPricingModel(self._target)
+
+
+def test_compare_pairs_predicted_with_next_period_realized() -> None:
+    """The PricingOutput convention: predicted.loc[t] scores against the (t, t+h] return.
+
+    A model whose expected returns at ``t`` exactly equal the return realized over ``(t, t+1]``
+    must price perfectly through ``compare`` (xs_r2 == 1, avg_abs_alpha == 0). Pairing predicted
+    with the same-date (t-1, t] return instead would break this identity.
+    """
+    canonical = _canonical()
+    ts_view = TimeSeriesView(canonical, horizon=1)
+    target = canonical.shift(-1)  # row t = the (t, t+1] realized return
+    entry = ComparisonEntry("exact", _ExactPricing(target), ts_view)
+
+    # bare-frame path (documented horizon-1 convention)
+    result = compare([entry], canonical)
+    r2 = float(result.loc[result["metric"] == "xs_r2", "value"].iloc[0])
+    aaa = float(result.loc[result["metric"] == "avg_abs_alpha", "value"].iloc[0])
+    np.testing.assert_allclose(r2, 1.0)
+    np.testing.assert_allclose(aaa, 0.0, atol=1e-12)
+
+    # view path (horizon-aware target_asof pairing) gives the identical numbers
+    result_v = compare([entry], ts_view)
+    np.testing.assert_allclose(
+        float(result_v.loc[result_v["metric"] == "xs_r2", "value"].iloc[0]), 1.0
+    )
+    np.testing.assert_allclose(
+        float(result_v.loc[result_v["metric"] == "avg_abs_alpha", "value"].iloc[0]),
+        0.0,
+        atol=1e-12,
+    )
+
+
+def test_compare_drops_unrealized_horizon_tail() -> None:
+    """The last calendar date (whose (t, t+1] return is unrealized in-sample) is not scored."""
+    canonical = _canonical()
+    ts_view = TimeSeriesView(canonical, horizon=1)
+    result = compare([ComparisonEntry("ts", _TSMean(), ts_view)], canonical)
+    # every emitted date is strictly before the final calendar date (the unrealized tail)
+    assert (result["date"] < canonical.index[-1]).all()
+
+
 def test_compare_two_methods_common_test_assets() -> None:
     canonical = _canonical()
     ts_view = TimeSeriesView(canonical, horizon=1)
