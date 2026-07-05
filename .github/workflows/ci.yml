@@ -50,6 +50,22 @@ jobs:
       - name: Tests
         run: uv run pytest
 
+  # Packaging lane (non-required): build the sdist + wheel and validate that the distributions
+  # are PyPI-ready (metadata renders, long_description is valid). `twine` is a dev/CI-only tool,
+  # never a runtime dependency of the package.
+  dist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }   # full history so hatch-vcs derives the version
+      - uses: astral-sh/setup-uv@v6
+        with: { python-version: "3.12" }
+      - run: uv sync --extra dev
+      - name: Build
+        run: uv build
+      - name: Check distributions
+        run: uv run twine check dist/*
+
   # Optional adapter lane (non-required): installs the heavy [skfolio] extra so the skfolio
   # adapter tests actually run (they self-skip in the required lane, which omits the extra).
   skfolio:

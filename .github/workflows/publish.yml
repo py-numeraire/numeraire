@@ -1,0 +1,37 @@
+# Publish to PyPI via Trusted Publishing (OIDC, no stored secrets/tokens).
+#
+# DISARMED ON PURPOSE. This workflow can only be started by hand
+# (`workflow_dispatch`) so it CANNOT fire automatically today — publishing to
+# PyPI is a deliberate, separate decision that is not yet enabled.
+#
+# To ARM it once a Trusted Publisher for `numeraire` is configured on PyPI
+# (https://pypi.org/manage/project/numeraire/settings/publishing/ — point it at
+# this repo + this workflow filename + the `pypi` environment), replace the
+# `workflow_dispatch` trigger below with:
+#
+#   on:
+#     release:
+#       types: [published]
+#
+# so that cutting a GitHub Release publishes the matching tagged version. Until
+# then, keep `workflow_dispatch` as the ONLY trigger.
+name: Publish
+on:
+  workflow_dispatch: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write          # required for PyPI Trusted Publishing (OIDC); no secrets
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }   # full history so hatch-vcs derives the version from the tag
+      - uses: astral-sh/setup-uv@v6
+        with: { python-version: "3.12" }
+      - name: Build
+        run: uv build
+      - name: Check distributions
+        run: uv run twine check dist/*
+      - uses: pypa/gh-action-pypi-publish@release/v1
