@@ -10,12 +10,12 @@ the arrows point toward the spine, never away from it.
 
 | Package | Role | Install |
 | --- | --- | --- |
-| **[numeraire](https://py-numeraire.org/)** | The spine: point-in-time views, the walk-forward engine, evaluators, statistical tests, the result schema, and the universal baselines. | `pip install numeraire` |
+| **[numeraire](https://numeraire.py-numeraire.org/)** | The spine: point-in-time views, the walk-forward engine, evaluators, statistical tests, the result schema, and the universal baselines. | `pip install numeraire` |
 | **[numeraire-graphics](https://graphics.py-numeraire.org/)** | Grammar-of-graphics figures (plotnine) over the tidy result schema and the engine's Output objects. Every plot returns a `ggplot`; it never draws or saves for you. | `pip install numeraire-graphics` |
 | **[numeraire-dataset](https://dataset.py-numeraire.org/)** | Open, reproducible data loaders and point-in-time builders — code, not data — cleaning public (and, with your own credentials, licensed) sources into tidy tables the framework consumes. | `pip install numeraire-dataset` |
 
 Each package name links to its documentation site
-(`py-numeraire.org`, `graphics.py-numeraire.org`, `dataset.py-numeraire.org`); source and releases
+(`numeraire.py-numeraire.org`, `graphics.py-numeraire.org`, `dataset.py-numeraire.org`); source and releases
 are on [PyPI](https://pypi.org/project/numeraire/) and GitHub (org
 [py-numeraire](https://github.com/py-numeraire)).
 
