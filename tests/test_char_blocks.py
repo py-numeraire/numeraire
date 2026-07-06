@@ -191,3 +191,47 @@ def test_vintaged_mode_rejects_nonzero_lag() -> None:
     # Buffers belong in the vintage timestamps, not a row-step lag; vintaged mode forbids lag != 0.
     with pytest.raises(ValueError, match="vintaged mode takes no lag"):
         CharBlock(_vint(), ["macro"], vintage_col="vintage", lag=1)
+
+
+def test_nat_vintage_rejected() -> None:
+    # A missing vintage stamp casts to int64 minimum ("available forever"); reject it as a leak.
+    panel = _vint()
+    panel.loc[0, "vintage"] = pd.NaT
+    with pytest.raises(ValueError, match="NaT"):
+        CharBlock(panel, ["macro"], vintage_col="vintage")
+
+
+def test_nat_ref_rejected() -> None:
+    panel = _osap()
+    panel.loc[0, "date"] = pd.NaT
+    with pytest.raises(ValueError, match="NaT"):
+        CharBlock(panel, ["osap"])
+
+
+def test_tz_aware_vintage_rejected() -> None:
+    # tz-aware stamps against a tz-naive calendar shift the availability boundary; require tz-naive.
+    panel = _vint()
+    panel["vintage"] = panel["vintage"].dt.tz_localize("UTC")
+    with pytest.raises(TypeError, match="tz-naive"):
+        CharBlock(panel, ["macro"], vintage_col="vintage")
+
+
+def test_tz_aware_ref_rejected() -> None:
+    panel = _osap()
+    panel["date"] = panel["date"].dt.tz_localize("UTC")
+    with pytest.raises(TypeError, match="tz-naive"):
+        CharBlock(panel, ["osap"])
+
+
+def test_duplicate_asset_ref_vintage_rejected() -> None:
+    # Two rows sharing (asset, ref_date, vintage) make an asset's edge order-dependent; reject it.
+    panel = pd.DataFrame(
+        {
+            "ref_date": pd.to_datetime(["2000-01-31", "2000-01-31"]),
+            "asset": ["A", "A"],
+            "vintage": pd.to_datetime(["2000-02-29", "2000-02-29"]),
+            "macro": [100.0, 101.0],
+        }
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        CharBlock(panel, ["macro"], vintage_col="vintage")

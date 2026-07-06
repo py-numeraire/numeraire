@@ -78,3 +78,48 @@ def test_mixed_with_feature_block_in_view() -> None:
     assert view.feature_names == ["x", "z"]
     # at 2020-04-30 the Apr-30 vintage is available (same-day release), so the edge is the Mar ref
     np.testing.assert_array_equal(view.features_asof("2020-04-30"), [30.0, 3.0])
+
+
+def test_nat_vintage_rejected() -> None:
+    # A missing vintage stamp would cast to int64 minimum ("available since the beginning of time"),
+    # a silent look-ahead: the row would count as ready at any decision date. Reject it instead.
+    table = _table()
+    table.loc[0, "vintage"] = pd.NaT
+    with pytest.raises(ValueError, match="NaT"):
+        VintagedBlock(table)
+
+
+def test_nat_ref_rejected() -> None:
+    table = _table()
+    table.loc[0, "ref_date"] = pd.NaT
+    with pytest.raises(ValueError, match="NaT"):
+        VintagedBlock(table)
+
+
+def test_tz_aware_vintage_rejected() -> None:
+    # A tz-aware source compared against a tz-naive decision calendar shifts the availability
+    # boundary by the offset; require the caller to normalize to tz-naive first.
+    table = _table()
+    table["vintage"] = table["vintage"].dt.tz_localize("UTC")
+    with pytest.raises(TypeError, match="tz-naive"):
+        VintagedBlock(table)
+
+
+def test_tz_aware_ref_rejected() -> None:
+    table = _table()
+    table["ref_date"] = table["ref_date"].dt.tz_localize("UTC")
+    with pytest.raises(TypeError, match="tz-naive"):
+        VintagedBlock(table)
+
+
+def test_duplicate_ref_vintage_rejected() -> None:
+    # Two rows sharing (ref_date, vintage) make the real-time edge order-dependent; reject at build.
+    table = pd.DataFrame(
+        {
+            "ref_date": pd.to_datetime(["2020-01-31", "2020-01-31"]),
+            "vintage": pd.to_datetime(["2020-02-29", "2020-02-29"]),
+            "x": [10.0, 11.0],
+        }
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        VintagedBlock(table)

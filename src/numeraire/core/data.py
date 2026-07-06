@@ -77,14 +77,35 @@ def _as_2d(frame: pd.DataFrame) -> Float:
     return np.ascontiguousarray(frame.to_numpy(dtype=np.float64))
 
 
-def _to_ns(values: pd.Series | pd.DatetimeIndex) -> NDArray[np.int64]:
+def _to_ns(values: pd.Series | pd.DatetimeIndex, *, context: str) -> NDArray[np.int64]:
     """Datetime values → int64 nanoseconds since the epoch, at a fixed ``ns`` resolution.
 
     Availability everywhere is a plain ``stamp <= t`` integer comparison. Forcing ``ns`` makes it
     independent of the input's parsed datetime resolution (pandas may land on ``s``/``us``/``ns``)
     and keeps it on the same scale as a scalar ``pd.Timestamp(t).value`` used at query time.
+
+    Two inputs would corrupt that comparison and are rejected rather than silently mis-scaled:
+
+    - **tz-aware stamps** convert to epoch ``ns`` in UTC, while a naive query ``t`` is compared as
+      wall-clock ``ns`` — the boundary would shift by the offset. The whole framework assumes
+      tz-naive timestamps, so tz-aware input raises ``TypeError``.
+    - **missing stamps** (``NaT``) cast to ``int64`` minimum, i.e. "available since the beginning of
+      time" — a silent look-ahead. A missing availability stamp raises ``ValueError``.
+
+    ``context`` names the offending column/source in the error message.
     """
-    arr = pd.DatetimeIndex(values).to_numpy(dtype="datetime64[ns]")
+    idx = pd.DatetimeIndex(values)
+    if idx.tz is not None:
+        raise TypeError(
+            f"{context}: timestamps must be tz-naive; convert with "
+            ".dt.tz_localize(None) / .tz_localize(None) after aligning sources to one timezone"
+        )
+    if idx.hasnans:
+        raise ValueError(
+            f"{context}: timestamp column contains missing values (NaT); "
+            "every availability stamp must be a real timestamp"
+        )
+    arr = idx.to_numpy(dtype="datetime64[ns]")
     return np.asarray(arr).astype(np.int64)
 
 
@@ -205,8 +226,19 @@ class VintagedBlock:
         vint = pd.to_datetime(table[vintage_col])
         self._names: list[str] = [str(c) for c in cols]
         # integer nanoseconds since the epoch → cheap real-timestamp availability / edge comparisons
-        self._ref: NDArray[np.int64] = _to_ns(ref)
-        self._vint: NDArray[np.int64] = _to_ns(vint)
+        self._ref: NDArray[np.int64] = _to_ns(
+            ref, context=f"VintagedBlock ref_date column {ref_col!r}"
+        )
+        self._vint: NDArray[np.int64] = _to_ns(
+            vint, context=f"VintagedBlock vintage column {vintage_col!r}"
+        )
+        # A duplicate (ref_date, vintage) pair makes the real-time edge order-dependent (two rows
+        # tie on both keys, so which value wins would depend on input row order); reject it.
+        if pd.MultiIndex.from_arrays([self._ref, self._vint]).has_duplicates:
+            raise ValueError(
+                f"VintagedBlock has duplicate ({ref_col!r}, {vintage_col!r}) rows; "
+                "each (ref_date, vintage) pair must be unique"
+            )
         self._vals: Float = _as_2d(table[cols])
         self.name: str | None = name
 
@@ -557,13 +589,20 @@ class CharBlock:
             raise ValueError(f"char-block panel is missing column(s) {missing}")
         df = panel[need].copy()
         ref = pd.to_datetime(df[keycol])
-        ref_ns = _to_ns(ref)
+        ref_ns = _to_ns(ref, context=f"CharBlock {keycol!r} column")
         assets = df[asset_col].to_numpy().astype(object)
         vals = _as_2d(df[names])
         vint_ns = None
         if vintage_col is not None:
             vint = pd.to_datetime(df[vintage_col])
-            vint_ns = _to_ns(vint)
+            vint_ns = _to_ns(vint, context=f"CharBlock vintage column {vintage_col!r}")
+            # A duplicate (asset, ref_date, vintage) triple makes an asset's real-time edge
+            # order-dependent (the tie is broken by input row order); reject it.
+            if pd.MultiIndex.from_arrays([assets, ref_ns, vint_ns]).has_duplicates:
+                raise ValueError(
+                    f"CharBlock has duplicate ({asset_col!r}, {ref_col!r}, {vintage_col!r}) rows; "
+                    "each (asset, ref_date, vintage) triple must be unique"
+                )
         # per-asset timestamp (ns) + value arrays, so each asset resolves independently
         self._by_asset: dict[object, _AssetChars] = {}
         for a in np.unique(assets):
@@ -582,7 +621,7 @@ class CharBlock:
 
         Row ``r`` is asset ``assets[r]`` at decision date ``dates[dpos[r]]``.
         """
-        cal_ns = _to_ns(dates)
+        cal_ns = _to_ns(dates, context="CharBlock decision calendar")
         out = np.full((len(assets), len(self.names)), np.nan, dtype=np.float64)
         for r in range(len(assets)):
             entry = self._by_asset.get(assets[r])
