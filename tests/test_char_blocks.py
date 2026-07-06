@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from conftest import toy_panel, toy_vintaged_chars
 from numeraire.core.data import CharBlock, CrossSectionView
@@ -129,3 +130,64 @@ def test_vintaged_chars_on_ragged_panel() -> None:
     # Feb's own revision (11.5, vintage Apr) is not yet visible -> no early-revision leak
     np.testing.assert_allclose(acc(cal[2], "AAA"), 11.0)
     assert np.isnan(acc(cal[3], "DDD"))  # DDD absent from the vintaged source -> nan
+
+
+# --- timestamp availability: sub-monthly data must not leak within a month ------------------------
+
+
+def test_lagged_intra_month_row_is_not_visible_early() -> None:
+    # Daily char panel for asset A stamped Mar-10 / Mar-20; decision date Mar-5 with lag=0. Nothing
+    # is known yet (contract: known at its row date) — the month-ordinal resolution used to return
+    # the Mar-20 value, a 15-day intra-month look-ahead.
+    panel = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2020-03-10", "2020-03-20"]),
+            "asset": ["A", "A"],
+            "x": [1.0, 2.0],
+        }
+    )
+    blk = CharBlock(panel, ["x"], lag=0)
+    out = blk.resolve(
+        pd.DatetimeIndex(["2020-03-05"]), np.array(["A"], dtype=object), np.array([0], np.int64)
+    )
+    assert np.isnan(out[0, 0])
+
+
+def test_lagged_month_end_row_is_not_visible_at_month_start() -> None:
+    # Monthly panel stamped month-end (rows Feb-29 / Mar-31) read on a daily calendar; decision
+    # Mar-2 must use the Feb row, not the not-yet-known Mar-31 row.
+    panel = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2020-02-29", "2020-03-31"]),
+            "asset": ["A", "A"],
+            "x": [10.0, 20.0],
+        }
+    )
+    blk = CharBlock(panel, ["x"], lag=0)
+    out = blk.resolve(
+        pd.DatetimeIndex(["2020-03-02"]), np.array(["A"], dtype=object), np.array([0], np.int64)
+    )
+    np.testing.assert_allclose(out[0, 0], 10.0)
+
+
+def test_vintaged_release_is_not_visible_before_its_stamp() -> None:
+    # Vintaged mode: ref Feb-29 released Mar-25; decision Mar-1 — the release has not happened yet.
+    panel = pd.DataFrame(
+        {
+            "ref_date": pd.to_datetime(["2020-02-29"]),
+            "vintage": pd.to_datetime(["2020-03-25"]),
+            "asset": ["A"],
+            "x": [7.0],
+        }
+    )
+    blk = CharBlock(panel, ["x"], vintage_col="vintage", lag=0)
+    out = blk.resolve(
+        pd.DatetimeIndex(["2020-03-01"]), np.array(["A"], dtype=object), np.array([0], np.int64)
+    )
+    assert np.isnan(out[0, 0])
+
+
+def test_vintaged_mode_rejects_nonzero_lag() -> None:
+    # Buffers belong in the vintage timestamps, not a row-step lag; vintaged mode forbids lag != 0.
+    with pytest.raises(ValueError, match="vintaged mode takes no lag"):
+        CharBlock(_vint(), ["macro"], vintage_col="vintage", lag=1)

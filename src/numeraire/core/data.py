@@ -30,6 +30,16 @@ by ``(date, asset)`` rather than being shared across assets. It shares the ``Dat
 (``window`` + ``calendar``) but exposes a cross-section-shaped ``features_asof`` / ``target_asof`` /
 ``aligned`` — see its own docstring. The naming follows the field's own dichotomy (Fama 2015,
 "Cross-Section *Versus* Time-Series Tests"): time-series tests (GRS) vs cross-sectional tests (FM).
+
+Time model. Two rules keep availability unambiguous across mixed data frequencies. First, inside
+the decision calendar everything is counted in *steps*: the forecast horizon, the walk-forward
+windows, and a block's own availability ``lag`` are position arithmetic on whatever calendar the
+caller supplied — the framework never interprets a calendar unit such as "month". Second, at every
+source boundary availability is a *timestamp* comparison: a vintage, release, or reference date is
+an event on the real timeline, so a row is usable at decision time ``t`` exactly when its stamp is
+``<= t`` (never "same month but later"). Controlling frequency — and any publication buffer — is
+the data provider's job: stamp the true availability into the data, or shift a coarse label to a
+conservative release date, before handing it to a block.
 """
 
 from __future__ import annotations
@@ -65,6 +75,17 @@ class Block(Protocol):
 def _as_2d(frame: pd.DataFrame) -> Float:
     """Return ``frame`` as a contiguous float64 array, raising on non-finite dtypes."""
     return np.ascontiguousarray(frame.to_numpy(dtype=np.float64))
+
+
+def _to_ns(values: pd.Series | pd.DatetimeIndex) -> NDArray[np.int64]:
+    """Datetime values → int64 nanoseconds since the epoch, at a fixed ``ns`` resolution.
+
+    Availability everywhere is a plain ``stamp <= t`` integer comparison. Forcing ``ns`` makes it
+    independent of the input's parsed datetime resolution (pandas may land on ``s``/``us``/``ns``)
+    and keeps it on the same scale as a scalar ``pd.Timestamp(t).value`` used at query time.
+    """
+    arr = pd.DatetimeIndex(values).to_numpy(dtype="datetime64[ns]")
+    return np.asarray(arr).astype(np.int64)
 
 
 def _to_excess(returns: pd.DataFrame, risk_free: pd.Series, method: str) -> pd.DataFrame:
@@ -151,13 +172,19 @@ class VintagedBlock:
     """A vintaged (point-in-time) block: a ``(ref_date x vintage)`` panel resolved by ``asof``.
 
     Built from a tidy table ``[ref_date, vintage, <series...>]`` (e.g. what a FRED-MD build yields).
-    ``asof(t)`` returns the real-time edge: among vintages available at ``t`` (``vintage`` month +
-    ``lag`` <= ``t``'s month), the most recent ``ref_date``'s value taken from its latest available
-    vintage. Revisions are respected — an earlier vintage's number is used until a later one is
-    available, so no future revision leaks in.
+    ``asof(t)`` returns the real-time edge: among rows whose ``vintage`` timestamp is at or before
+    ``t`` (``vintage <= t``), the most recent ``ref_date``'s value taken from its latest available
+    vintage. Availability is a plain timestamp comparison — a release stamped on a given day becomes
+    visible on that day and not before — so revisions are respected (an earlier vintage's number is
+    used until a later one is released) and no future vintage leaks in.
 
-    ``lag`` (whole months, default 1) is the availability buffer. The ``vintage`` label already *is*
-    the release month, so one month suffices; sweep it up for a more conservative real-time cut.
+    Availability is read straight off the ``vintage`` column, which must already carry the true
+    release timestamp (the data provider's job). To model a more conservative real-time cut — e.g. a
+    feed that arrives some time after its stamped release — shift the vintage column before building
+    the block::
+
+        table = table.assign(vintage=table["vintage"] + pd.DateOffset(months=1))
+        block = VintagedBlock(table)
     """
 
     def __init__(
@@ -165,13 +192,10 @@ class VintagedBlock:
         table: pd.DataFrame,
         *,
         series: list[str] | None = None,
-        lag: int = 1,
         name: str | None = None,
         ref_col: str = "ref_date",
         vintage_col: str = "vintage",
     ) -> None:
-        if lag < 0:
-            raise ValueError(f"vintaged-block lag must be >= 0; got {lag}")
         cols = (
             [c for c in table.columns if c not in (ref_col, vintage_col)]
             if series is None
@@ -180,13 +204,10 @@ class VintagedBlock:
         ref = pd.to_datetime(table[ref_col])
         vint = pd.to_datetime(table[vintage_col])
         self._names: list[str] = [str(c) for c in cols]
-        # month ordinals (year*12 + month) → cheap availability / edge comparisons
-        self._ref: NDArray[np.int64] = np.asarray(ref.dt.year * 12 + ref.dt.month, dtype=np.int64)
-        self._vint: NDArray[np.int64] = np.asarray(
-            vint.dt.year * 12 + vint.dt.month, dtype=np.int64
-        )
+        # integer nanoseconds since the epoch → cheap real-timestamp availability / edge comparisons
+        self._ref: NDArray[np.int64] = _to_ns(ref)
+        self._vint: NDArray[np.int64] = _to_ns(vint)
         self._vals: Float = _as_2d(table[cols])
-        self.lag: int = lag
         self.name: str | None = name
 
     @property
@@ -196,9 +217,8 @@ class VintagedBlock:
 
     def _edge(self, t: object) -> int:
         """Row index of the real-time edge at ``t`` (latest ref_date, latest available vintage)."""
-        ts = pd.Timestamp(t)  # pyright: ignore[reportArgumentType]
-        t_ord = ts.year * 12 + ts.month
-        avail = np.flatnonzero(self._vint + self.lag <= t_ord)
+        t_ns = int(pd.Timestamp(t).value)  # pyright: ignore[reportArgumentType]
+        avail = np.flatnonzero(self._vint <= t_ns)
         if avail.size == 0:
             return -1
         edge_ref = int(self._ref[avail].max())
@@ -206,7 +226,7 @@ class VintagedBlock:
         return int(at_edge[np.argmax(self._vint[at_edge])])
 
     def is_ready(self, t: object) -> bool:
-        """Whether any vintage is available at ``t`` (False before the first release + lag)."""
+        """Whether any vintage is available at ``t`` (False before the first release timestamp)."""
         return self._edge(t) >= 0
 
     def asof(self, t: object) -> Float:
@@ -217,15 +237,14 @@ class VintagedBlock:
         return self._vals[i]
 
     def truncate(self, end: object) -> VintagedBlock:
-        """A copy holding only vintages released by ``end`` (``vintage`` month <= ``end`` month)."""
-        ts = pd.Timestamp(end)  # pyright: ignore[reportArgumentType]
-        keep = self._vint <= ts.year * 12 + ts.month
+        """A copy holding only vintages released by ``end`` (``vintage <= end``)."""
+        end_ns = int(pd.Timestamp(end).value)  # pyright: ignore[reportArgumentType]
+        keep = self._vint <= end_ns
         blk = object.__new__(VintagedBlock)
         blk._names = self._names
         blk._ref = self._ref[keep]
         blk._vint = self._vint[keep]
         blk._vals = self._vals[keep]
-        blk.lag = self.lag
         blk.name = self.name
         return blk
 
@@ -461,22 +480,26 @@ class PanelTensor:
 
 
 class _AssetChars:
-    """One asset's characteristic history + the per-asset PIT edge/lag lookups CharBlock uses."""
+    """One asset's characteristic history + the per-asset PIT edge/lag lookups CharBlock uses.
+
+    ``ref``/``vint`` are integer nanoseconds since the epoch (real timestamps), so availability is a
+    plain ``<= t`` comparison in both modes.
+    """
 
     def __init__(self, ref: NDArray[np.int64], vint: NDArray[np.int64] | None, vals: Float) -> None:
         self.ref = ref
         self.vint = vint
         self.vals = vals
 
-    def at_lag(self, t_ord: int, lag: int) -> int:
-        """Row of the latest ref-month ``<= t`` pulled back by ``lag`` (lagged mode); -1 if none."""
-        pos = int(np.searchsorted(self.ref, t_ord, side="right")) - 1 - lag
+    def at_lag(self, t_ns: int, lag: int) -> int:
+        """Row of the latest ref-date ``<= t`` stepped back ``lag`` rows (lagged); -1 if none."""
+        pos = int(np.searchsorted(self.ref, t_ns, side="right")) - 1 - lag
         return pos if pos >= 0 else -1
 
-    def edge(self, t_ord: int, lag: int) -> int:
+    def edge(self, t_ns: int) -> int:
         """Row of the real-time edge at ``t`` (latest ref, latest available vintage); -1 if none."""
         assert self.vint is not None
-        avail = np.flatnonzero(self.vint + lag <= t_ord)
+        avail = np.flatnonzero(self.vint <= t_ns)
         if avail.size == 0:
             return -1
         edge_ref = int(self.ref[avail].max())
@@ -491,12 +514,15 @@ class CharBlock:
     per-stock predictor panels (e.g. two vendors' characteristic sets) coexist, each with its own
     availability, and concatenate along the characteristic axis. Two modes:
 
-    - **lagged** (default): a tidy ``[date, asset, <chars...>]`` panel; asset ``i``'s value at
-      decision date ``t`` is its row ``lag`` steps back in ``i``'s own series (per-asset lag).
+    - **lagged** (default): a tidy ``[date, asset, <chars...>]`` panel; availability is the row's
+      own ``date`` timestamp (``date <= t``), then asset ``i``'s value is stepped back ``lag`` rows
+      in ``i``'s own series (per-asset lag, counted in row steps).
     - **vintaged** (``vintage_col`` given): a ``[ref_date, asset, vintage, <chars...>]`` panel;
       asset ``i``'s value at ``t`` is its real-time edge — latest ``ref_date`` whose vintage is
-      available (``vintage`` month ``+ lag <= t``), from that ref's latest vintage (per-asset
+      available (``vintage <= t`` by timestamp), from that ref's latest vintage (per-asset
       :class:`VintagedBlock`). This makes per-stock characteristic revisions PIT-safe mechanically.
+      ``lag`` is not meaningful here (buffers belong in the vintage timestamps), so passing a
+      non-zero ``lag`` together with ``vintage_col`` is an error.
 
     Resolved against a view's decision dates at construction (each date uses only info available by
     it), so downstream needs no special-casing. Align identifiers to a common id before building it.
@@ -515,6 +541,11 @@ class CharBlock:
     ) -> None:
         if lag < 0:
             raise ValueError(f"char-block lag must be >= 0; got {lag}")
+        if vintage_col is not None and lag != 0:
+            raise ValueError(
+                "char-block vintaged mode takes no lag (availability is the vintage timestamp); "
+                "apply any publication buffer to the vintage column before building the block"
+            )
         names = list(chars)
         self.names: list[str] = [str(c) for c in names]
         self.lag: int = lag
@@ -526,23 +557,23 @@ class CharBlock:
             raise ValueError(f"char-block panel is missing column(s) {missing}")
         df = panel[need].copy()
         ref = pd.to_datetime(df[keycol])
-        ref_ord = np.asarray(ref.dt.year * 12 + ref.dt.month, dtype=np.int64)
+        ref_ns = _to_ns(ref)
         assets = df[asset_col].to_numpy().astype(object)
         vals = _as_2d(df[names])
-        vint_ord = None
+        vint_ns = None
         if vintage_col is not None:
             vint = pd.to_datetime(df[vintage_col])
-            vint_ord = np.asarray(vint.dt.year * 12 + vint.dt.month, dtype=np.int64)
-        # per-asset month-ordinal + value arrays, so each asset resolves independently
+            vint_ns = _to_ns(vint)
+        # per-asset timestamp (ns) + value arrays, so each asset resolves independently
         self._by_asset: dict[object, _AssetChars] = {}
         for a in np.unique(assets):
             m = assets == a
             if self._vintaged:
-                assert vint_ord is not None
-                self._by_asset[a] = _AssetChars(ref_ord[m], vint_ord[m], vals[m])
+                assert vint_ns is not None
+                self._by_asset[a] = _AssetChars(ref_ns[m], vint_ns[m], vals[m])
             else:
-                order = np.argsort(ref_ord[m], kind="stable")
-                self._by_asset[a] = _AssetChars(ref_ord[m][order], None, vals[m][order])
+                order = np.argsort(ref_ns[m], kind="stable")
+                self._by_asset[a] = _AssetChars(ref_ns[m][order], None, vals[m][order])
 
     def resolve(
         self, dates: pd.DatetimeIndex, assets: NDArray[np.object_], dpos: NDArray[np.int64]
@@ -551,14 +582,14 @@ class CharBlock:
 
         Row ``r`` is asset ``assets[r]`` at decision date ``dates[dpos[r]]``.
         """
-        cal_ord = np.asarray(dates.year * 12 + dates.month, dtype=np.int64)
+        cal_ns = _to_ns(dates)
         out = np.full((len(assets), len(self.names)), np.nan, dtype=np.float64)
         for r in range(len(assets)):
             entry = self._by_asset.get(assets[r])
             if entry is None:
                 continue
-            t_ord = int(cal_ord[dpos[r]])
-            i = entry.edge(t_ord, self.lag) if self._vintaged else entry.at_lag(t_ord, self.lag)
+            t_ns = int(cal_ns[dpos[r]])
+            i = entry.edge(t_ns) if self._vintaged else entry.at_lag(t_ns, self.lag)
             if i >= 0:
                 out[r] = entry.vals[i]
         return out

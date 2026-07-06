@@ -57,13 +57,13 @@ def _combined_view(horizon: int = 1) -> TimeSeriesView:
     """The grand combination: multi-asset excess returns + three heterogeneous feature blocks.
 
     predictors (lag=0, shared calendar) + a publication-lagged macro (lag=2) + a vintaged FRED-like
-    panel (VintagedBlock, lag=1). Exercises all three block flavours in one view.
+    panel (VintagedBlock, timestamp asof). Exercises all three block flavours in one view.
     """
     returns = toy_assets()
     blocks = [
         FeatureBlock(toy_predictors(), lag=0, name="pred"),
         toy_macro_block(lag=2),
-        toy_vintaged_block(lag=1),
+        toy_vintaged_block(),
     ]
     return TimeSeriesView(returns, blocks=blocks, horizon=horizon)
 
@@ -192,7 +192,7 @@ def test_walk_forward_with_vintaged_block_end_to_end() -> None:
         risk_free=rf,
         blocks=[
             FeatureBlock(toy_predictors(), lag=0, name="pred"),
-            VintagedBlock(toy_vintaged_table(n_refs=72), lag=1, name="fred"),
+            VintagedBlock(toy_vintaged_table(n_refs=72), name="fred"),
         ],
     )
     out = backtest_weights(

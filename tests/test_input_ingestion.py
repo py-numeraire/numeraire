@@ -122,9 +122,11 @@ def _vintage_table() -> pd.DataFrame:
     )
 
 
-def test_vintaged_block_rejects_negative_lag() -> None:
-    with pytest.raises(ValueError, match="lag must be >= 0"):
-        VintagedBlock(_vintage_table(), lag=-1)
+def test_vintaged_block_no_longer_accepts_lag() -> None:
+    # `lag` was removed: availability is now a plain `vintage <= t` timestamp comparison, and any
+    # publication buffer is applied to the vintage column at the data end (not via a month lag).
+    with pytest.raises(TypeError):
+        VintagedBlock(_vintage_table(), lag=1)  # type: ignore[call-arg]
 
 
 def test_vintaged_block_series_subset_selects_columns() -> None:
