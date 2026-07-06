@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }   # tags for hatch-vcs (version must satisfy sibling pins)
       - uses: astral-sh/setup-uv@v6
         with: { python-version: "3.12" }
       - run: uv sync --extra dev
@@ -32,6 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }   # tags for hatch-vcs (version must satisfy sibling pins)
       - uses: astral-sh/setup-uv@v6
         with: { python-version: "3.11" }
       - run: uv sync --extra dev --resolution lowest-direct
@@ -44,6 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }   # tags for hatch-vcs (version must satisfy sibling pins)
       - uses: astral-sh/setup-uv@v6
         with: { python-version: "3.13" }
       - run: uv sync --extra dev --upgrade
@@ -72,6 +75,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }   # tags for hatch-vcs (version must satisfy sibling pins)
       - uses: astral-sh/setup-uv@v6
         with: { python-version: "3.12" }
       - run: uv sync --extra dev --extra skfolio
@@ -84,6 +88,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }   # tags for hatch-vcs (version must satisfy sibling pins)
       - uses: astral-sh/setup-uv@v6
         with: { python-version: "3.12" }
       - run: uv sync --extra docs
