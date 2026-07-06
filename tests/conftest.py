@@ -104,9 +104,9 @@ def toy_vintaged_table(n_refs: int = 24, seed: int = 15) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["ref_date", "vintage", "INDPRO", "UNRATE"])
 
 
-def toy_vintaged_block(lag: int = 1, name: str = "fred") -> VintagedBlock:
-    """The vintaged panel wrapped as a :class:`VintagedBlock` (asof by ``vintage + lag``)."""
-    return VintagedBlock(toy_vintaged_table(), lag=lag, name=name)
+def toy_vintaged_block(name: str = "fred") -> VintagedBlock:
+    """The vintaged panel wrapped as a :class:`VintagedBlock` (asof by ``vintage`` timestamp)."""
+    return VintagedBlock(toy_vintaged_table(), name=name)
 
 
 # presence windows (global-month indices) → a ragged universe with entry, exit, and a late arrival

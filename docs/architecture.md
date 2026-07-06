@@ -27,6 +27,19 @@ concrete views cover the two halves of empirical asset pricing.
   date-sorted panel. For tensor and neural methods it ejects a dense `(T × N × K)`
   {class}`~numeraire.core.data.PanelTensor` with an explicit presence mask.
 
+### The time model is a contract
+
+Two rules keep availability unambiguous, and the framework holds to both. **Inside the decision
+calendar, horizon and lags are step arithmetic** on whatever calendar you supply: `horizon=1`, a
+walk-forward window, or a block's own availability lag all count *positions*, never a unit like
+"month". The framework never interprets a calendar unit, so daily, weekly, and monthly data are all
+first-class. **At every source boundary, availability is a timestamp comparison:** a row or vintage
+stamped `s` is usable at decision time `t` exactly when `s <= t` — visible on its stamped day and
+not one moment before. Consequently, publication delays and release buffers belong in the data's
+timestamps: stamp the true availability date (or shift a coarse label to a conservative release
+date) at the data-preparation layer, rather than expecting the framework to add unit-based
+arithmetic to compensate.
+
 ### The `(t, t+h]` pairing convention
 
 The single convention every driver and evaluator obeys: features known **as of** `t` are paired

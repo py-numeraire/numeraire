@@ -8,6 +8,34 @@ Versions are tag-driven (`hatch-vcs`).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking — point-in-time availability is now a real-timestamp comparison.** `VintagedBlock` and
+  `CharBlock` previously decided what was "known" by comparing calendar *month ordinals*, so a row
+  or release stamped later in the same month counted as already available — a silent intra-month
+  look-ahead whenever the data or the decision calendar was finer than monthly (daily panels,
+  month-end-stamped rows read on a daily calendar, mid-month releases). Availability is now the
+  unit-free rule `stamp <= t`: a reference date, vintage, or release is visible on its stamped day
+  and not before. Behavior only changes for data whose stamps are misaligned within a period, and
+  always in the safe direction (a value becomes older or `NaN`, never newer). For the
+  timestamp-comparison change in isolation, month-end-stamped monthly data is unaffected (the
+  separate availability shift from removing the default `lag` is described in the next bullet).
+  Missing (`NaT`) availability stamps and tz-aware stamps are now rejected at construction rather
+  than silently mis-scaled (a `NaT` stamp used to read as "available since the beginning of time",
+  a tz-aware stamp shifted the boundary by its UTC offset). Duplicate `(ref_date, vintage)` /
+  `(asset, ref_date, vintage)` keys, whose real-time edge was order-dependent, now raise as well.
+- **Breaking — `VintagedBlock` no longer takes a `lag` argument.** The old `lag` (whole months,
+  default 1) was a coarse availability buffer that cannot be expressed under timestamp resolution.
+  Bake any publication delay into the `vintage` column at the data end instead — e.g.
+  `table.assign(vintage=table["vintage"] + pd.DateOffset(months=1))` before constructing the block.
+  Consumers that relied on the default `lag=1` will see availability move up to ~one period earlier
+  (the old default was deliberately over-conservative); this is correct real-time behavior, but a
+  golden number fed by a vintaged source may shift.
+- **Breaking — `CharBlock` vintaged mode rejects a non-zero `lag`.** In vintaged mode availability
+  is the vintage timestamp, so a row-step lag is meaningless; passing `lag != 0` together with
+  `vintage_col` now raises `ValueError`. Lagged mode is unchanged: availability is the row's own
+  date and `lag` still steps back that many rows in the asset's own series.
+
 ## [0.2.2] - 2026-07-07
 
 Documentation and packaging refresh only — no functional changes since 0.2.1.
