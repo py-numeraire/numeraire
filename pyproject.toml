@@ -50,6 +50,12 @@ docs = [
 ]
 skfolio = ["skfolio>=0.5"]
 
+# Ecosystem convenience extras — pull in the sibling packages (each depends back on numeraire).
+# `pip install numeraire` stays the minimal spine; opt into the plotting / data companions here.
+graphics = ["numeraire-graphics>=0.1"]
+data = ["numeraire-dataset>=0.1"]
+all = ["numeraire-graphics>=0.1", "numeraire-dataset>=0.1"]
+
 # Methods bundled in the repo register themselves via entry points (open registry).
 # External packages (numeraire-yourlab, numeraire-<method>) register the same way.
 # The universal baselines dogfood the discovery mechanism (snake + CamelCase names).
