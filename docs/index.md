@@ -33,22 +33,15 @@ The boundary rule
   adapters, and reference libraries never leak into the spine. The rule is enforced in CI by
   `import-linter`.
 
-## Install
-
-Until the first PyPI release, install from GitHub:
+## Installation
 
 ```bash
-pip install "numeraire @ git+https://github.com/py-numeraire/numeraire"
+pip install numeraire
 ```
 
-or, in a `uv`-managed project:
-
-```bash
-uv add "numeraire @ git+https://github.com/py-numeraire/numeraire"
-```
-
-The base install is the spine plus the native evaluators; optional integrations (for example the
-`skfolio` portfolio optimizers) live behind extras.
+The base install is the spine plus the native evaluators; the companion packages and optional
+integrations live behind extras (`numeraire[all]`, `[graphics]`, `[data]`, `[skfolio]`). See
+{doc}`installation` for the full matrix.
 
 ## A first backtest
 
@@ -71,21 +64,24 @@ print(SharpeEvaluator().evaluate(result)[["method", "metric", "value", "protocol
 
 ## Where to go next
 
-- {doc}`quickstart` — a runnable, end-to-end walk-through on synthetic data.
-- {doc}`architecture` — the mental model: views, capabilities, the engine family, evaluators, the
-  result schema, the simulator, and the boundary rule.
+- {doc}`getting-started` — install and a runnable, end-to-end walk-through on synthetic data.
+- {doc}`user-guide` — the mental model: views, capabilities, the engine family, evaluators,
+  the result schema, the simulator, and method comparison.
 - {doc}`extending` — write and self-certify your own method.
-- {doc}`comparison` — compare competing methods on one common set of test assets.
+- {doc}`ecosystem` — the companion packages and how they fit together.
+- {doc}`related-projects` — how numeraire relates to statsmodels, linearmodels, skfolio, and others.
 - {doc}`api/index` — the full API reference.
 
 ```{toctree}
 :hidden:
 :maxdepth: 2
 
-quickstart
-architecture
+getting-started
+user-guide
+ecosystem
+examples
 extending
-comparison
+related-projects
 api/index
 changelog
 ```

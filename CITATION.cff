@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use numeraire in your research, please cite it as below."
+title: "numeraire: a research framework for backtesting, comparing, and replicating empirical asset-pricing methods"
+type: software
+authors:
+  - family-names: Wu
+    given-names: Yuheng
+    orcid: "https://orcid.org/0009-0005-4347-0947"
+version: 0.2.1
+date-released: "2026-07-06"
+url: "https://github.com/py-numeraire/numeraire"
+repository-code: "https://github.com/py-numeraire/numeraire"
+license: BSD-3-Clause
+keywords:
+  - asset pricing
+  - financial econometrics
+  - backtesting
+  - factor models
+  - reproducible research
+  - quantitative finance
+abstract: >-
+  numeraire is an extensible Python framework providing a stable, representation-agnostic
+  spine for backtesting, comparing, and replicating empirical asset-pricing and
+  financial-econometrics methods. It defines capability protocols (portfolio weights,
+  return forecasts, a priced cross-section), a point-in-time data view, a walk-forward
+  out-of-sample engine, and a library of evaluators and statistical tests, so that methods
+  ranging from linear factor models to nonlinear and neural estimators plug in as
+  first-class, comparable extensions.

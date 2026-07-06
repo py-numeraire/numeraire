@@ -68,10 +68,22 @@ intersphinx_mapping = {
 
 html_theme = "pydata_sphinx_theme"
 html_title = f"numeraire {version}"
+
+# Canonical base URL for the built site (served at the domain root by Cloudflare Pages).
+html_baseurl = "https://py-numeraire.org/"
+
 html_theme_options = {
     "github_url": "https://github.com/py-numeraire/numeraire",
-    "icon_links": [],
+    "icon_links": [
+        {
+            "name": "PyPI",
+            "url": "https://pypi.org/project/numeraire/",
+            "icon": "fa-brands fa-python",
+        },
+    ],
     "navigation_with_keys": False,
     "show_prev_next": True,
+    "show_toc_level": 2,
+    "navbar_align": "left",
 }
 html_static_path = ["_static"]
