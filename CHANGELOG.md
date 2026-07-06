@@ -8,6 +8,23 @@ Versions are tag-driven (`hatch-vcs`).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-07
+
+Documentation and packaging refresh only — no functional changes since 0.2.1.
+
+### Changed
+
+- Rebuilt the documentation site and README: an academic structure with a pain-first overview,
+  grouped navigation, an ecosystem page, and a "How to cite" section. The docs now live at
+  <https://numeraire.py-numeraire.org/> (Cloudflare Pages), cross-linked with the companion
+  packages' sites.
+- Updated the `Documentation` project URL to the new docs domain.
+
+### Added
+
+- `CITATION.cff` (so GitHub renders a "Cite this repository" button) and a BibTeX snippet in the
+  README.
+
 ## [0.2.1] - 2026-07-06
 
 Ecosystem release: the plotting and data companion packages are now on PyPI, and this
