@@ -74,6 +74,10 @@ html_baseurl = "https://py-numeraire.org/"
 
 html_theme_options = {
     "github_url": "https://github.com/py-numeraire/numeraire",
+    "external_links": [
+        {"name": "graphics", "url": "https://graphics.py-numeraire.org/"},
+        {"name": "dataset", "url": "https://dataset.py-numeraire.org/"},
+    ],
     "icon_links": [
         {
             "name": "PyPI",

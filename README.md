@@ -113,9 +113,9 @@ tiny public example slices and no bundled methods; everything else is an optiona
 
 | Package | Role | Install |
 | --- | --- | --- |
-| **[numeraire](https://pypi.org/project/numeraire/)** | The spine: views, engine, evaluators, result schema, statistical tests. | `pip install numeraire` |
-| **[numeraire-graphics](https://pypi.org/project/numeraire-graphics/)** | Grammar-of-graphics figures over the result schema and Output objects. | `pip install numeraire-graphics` |
-| **[numeraire-dataset](https://pypi.org/project/numeraire-dataset/)** | Open, reproducible data loaders and point-in-time builders. | `pip install numeraire-dataset` |
+| **[numeraire](https://py-numeraire.org/)** | The spine: views, engine, evaluators, result schema, statistical tests. | `pip install numeraire` |
+| **[numeraire-graphics](https://graphics.py-numeraire.org/)** | Grammar-of-graphics figures over the result schema and Output objects. | `pip install numeraire-graphics` |
+| **[numeraire-dataset](https://dataset.py-numeraire.org/)** | Open, reproducible data loaders and point-in-time builders. | `pip install numeraire-dataset` |
 
 Reproductions of published methods, and a lab's own unpublished methods, live in **separate
 packages** that register through the `numeraire.methods` entry-point group and pin `numeraire` — they
