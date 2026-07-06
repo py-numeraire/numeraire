@@ -9,14 +9,14 @@
   <a href="https://pypi.org/project/numeraire/"><img alt="PyPI" src="https://img.shields.io/pypi/v/numeraire.svg"></a>
   <a href="https://pypi.org/project/numeraire/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/numeraire.svg"></a>
   <a href="https://github.com/py-numeraire/numeraire/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/py-numeraire/numeraire/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://py-numeraire.org/"><img alt="Documentation" src="https://img.shields.io/badge/docs-latest-blue.svg"></a>
+  <a href="https://numeraire.py-numeraire.org/"><img alt="Documentation" src="https://img.shields.io/badge/docs-latest-blue.svg"></a>
   <a href="https://github.com/py-numeraire/numeraire/blob/main/LICENSE"><img alt="License: BSD-3-Clause" src="https://img.shields.io/badge/license-BSD--3--Clause-blue.svg"></a>
 </p>
 
 <p align="center">
-  <a href="https://py-numeraire.org/">Documentation</a> ·
-  <a href="https://py-numeraire.org/quickstart.html">Quickstart</a> ·
-  <a href="https://py-numeraire.org/api/index.html">API Reference</a> ·
+  <a href="https://numeraire.py-numeraire.org/">Documentation</a> ·
+  <a href="https://numeraire.py-numeraire.org/quickstart.html">Quickstart</a> ·
+  <a href="https://numeraire.py-numeraire.org/api/index.html">API Reference</a> ·
   <a href="https://pypi.org/project/numeraire/">PyPI</a> ·
   <a href="#how-to-cite">Citation</a>
 </p>
@@ -103,7 +103,7 @@ print(SharpeEvaluator().evaluate(result)[["method", "metric", "value", "protocol
 
 `backtest` reads the fitted model's capability and the view type and dispatches to the right typed
 driver; `SharpeEvaluator` emits rows of the standard tidy schema. See the
-[quickstart](https://py-numeraire.org/quickstart.html) for the full walk-through,
+[quickstart](https://numeraire.py-numeraire.org/quickstart.html) for the full walk-through,
 including a forecasting example.
 
 ## The ecosystem
@@ -113,7 +113,7 @@ tiny public example slices and no bundled methods; everything else is an optiona
 
 | Package | Role | Install |
 | --- | --- | --- |
-| **[numeraire](https://py-numeraire.org/)** | The spine: views, engine, evaluators, result schema, statistical tests. | `pip install numeraire` |
+| **[numeraire](https://numeraire.py-numeraire.org/)** | The spine: views, engine, evaluators, result schema, statistical tests. | `pip install numeraire` |
 | **[numeraire-graphics](https://graphics.py-numeraire.org/)** | Grammar-of-graphics figures over the result schema and Output objects. | `pip install numeraire-graphics` |
 | **[numeraire-dataset](https://dataset.py-numeraire.org/)** | Open, reproducible data loaders and point-in-time builders. | `pip install numeraire-dataset` |
 
@@ -134,7 +134,7 @@ preparation.
 ## Documentation
 
 Full documentation — installation, a runnable quickstart, the architecture, the extension guide, and
-the API reference — is at **<https://py-numeraire.org/>**.
+the API reference — is at **<https://numeraire.py-numeraire.org/>**.
 
 ## How to cite
 
@@ -160,7 +160,7 @@ Contributions to the spine — evaluators, statistical tests, and engine or view
 welcome. Methods are distributed as separate packages rather than added to core: a method is any
 object with `fit(view) -> model` that advertises a capability, registered through the
 `numeraire.methods` entry point and self-certified with `numeraire.testing.check_estimator` (see the
-[extension guide](https://py-numeraire.org/extending.html)).
+[extension guide](https://numeraire.py-numeraire.org/extending.html)).
 
 Development uses [uv](https://docs.astral.sh/uv/), `ruff`, `basedpyright` (strict on core), and
 `import-linter` for the architecture boundary:

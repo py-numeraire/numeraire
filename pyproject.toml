@@ -71,7 +71,7 @@ HistoricalMean = "numeraire.baselines:HistoricalMean"
 
 [project.urls]
 Homepage = "https://github.com/py-numeraire/numeraire"
-Documentation = "https://py-numeraire.org/"
+Documentation = "https://numeraire.py-numeraire.org/"
 Repository = "https://github.com/py-numeraire/numeraire"
 Issues = "https://github.com/py-numeraire/numeraire/issues"
 Changelog = "https://github.com/py-numeraire/numeraire/blob/main/CHANGELOG.md"

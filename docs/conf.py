@@ -70,7 +70,7 @@ html_theme = "pydata_sphinx_theme"
 html_title = f"numeraire {version}"
 
 # Canonical base URL for the built site (served at the domain root by Cloudflare Pages).
-html_baseurl = "https://py-numeraire.org/"
+html_baseurl = "https://numeraire.py-numeraire.org/"
 
 html_theme_options = {
     "github_url": "https://github.com/py-numeraire/numeraire",
