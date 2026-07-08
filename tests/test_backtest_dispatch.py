@@ -135,6 +135,26 @@ class _NoCapEst:
         return _NoCapModel()
 
 
+class _RecordingWeightsEst:
+    """Records the max calendar date of every view it is fitted on (to inspect the probe fit)."""
+
+    def __init__(self) -> None:
+        self.fit_max_dates: list[pd.Timestamp] = []
+
+    def fit(self, view: TimeSeriesView) -> _WeightsModel:
+        self.fit_max_dates.append(view.calendar.max())
+        return _WeightsModel()
+
+
+class _RecordingForecastEst:
+    def __init__(self) -> None:
+        self.fit_max_dates: list[pd.Timestamp] = []
+
+    def fit(self, view: TimeSeriesView) -> _ForecastModel:
+        self.fit_max_dates.append(view.calendar.max())
+        return _ForecastModel()
+
+
 def _ts_view() -> TimeSeriesView:
     return make_monthly_view(n=120, n_assets=3)
 
@@ -200,6 +220,42 @@ def test_backtest_raises_on_ambiguous_multiple_capabilities() -> None:
 def test_backtest_in_sample_requires_pricing() -> None:
     with pytest.raises(TypeError, match="does not support 'to_pricing'"):
         backtest(_WeightsEst(), _ts_view(), _splitter(), method="w", in_sample=True)
+
+
+# -- probe fit sees only the driver's first train window, never the full sample -------------------
+
+
+def test_probe_fit_sees_only_first_fold_train_weights() -> None:
+    view = _ts_view()
+    sp = _splitter()  # min_train=60, test_size=12
+    est = _RecordingWeightsEst()
+    out = backtest(est, view, sp, method="w")
+    assert isinstance(out, WeightsOutput)
+    # The probe fit (the first recorded fit) sees exactly the first fold's train window ...
+    first_train_end = next(iter(sp.split(view)))[0].calendar.max()
+    probe_max = est.fit_max_dates[0]
+    assert probe_max == first_train_end
+    # ... and never the full sample (that would be a look-ahead channel for a stateful estimator).
+    assert probe_max < view.calendar.max()
+
+
+def test_probe_fit_sees_only_warmup_prefix_forecast() -> None:
+    view = _ts_view()
+    est = _RecordingForecastEst()
+    out = backtest(est, view, method="f", min_train=24)
+    assert isinstance(out, ForecastOutput)
+    probe_max = est.fit_max_dates[0]
+    # The probe window is exactly the first ``min_train`` calendar steps.
+    assert probe_max == view.calendar[24 - 1]
+    assert probe_max < view.calendar.max()
+
+
+def test_probe_fit_window_kwarg_rolls_the_prefix() -> None:
+    view = _ts_view()
+    est = _RecordingForecastEst()
+    backtest(est, view, method="f", window=18)
+    # With a rolling ``window`` the warm-up ends at the window-th step (mirrors backtest_forecast).
+    assert est.fit_max_dates[0] == view.calendar[18 - 1]
 
 
 # -- deprecated aliases: still work AND emit DeprecationWarning ------------------------------------
