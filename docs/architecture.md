@@ -40,6 +40,61 @@ timestamps: stamp the true availability date (or shift a coarse label to a conse
 date) at the data-preparation layer, rather than expecting the framework to add unit-based
 arithmetic to compensate.
 
+### Giving each series its own publication lag
+
+Because release buffers live in the data's stamps rather than in engine parameters, a per-series
+(per-factor) availability lag is expressed by shifting that series' `vintage` timestamps before the
+block is built, not by passing a lag argument down the pipeline. To give one series a longer delay
+than another, shift its `vintage` column and enter the two series as **separate**
+{class}`~numeraire.core.data.VintagedBlock` objects, then combine them in one
+{class}`~numeraire.core.data.TimeSeriesView` via `blocks=[...]`:
+
+```python
+import pandas as pd
+from numeraire import TimeSeriesView, VintagedBlock
+
+dates = pd.date_range("2020-01-31", periods=6, freq="ME")
+returns = pd.DataFrame({"mkt": [0.01, -0.02, 0.03, 0.00, 0.02, -0.01]}, index=dates)
+
+# Two vintaged series; each row's `vintage` is the day its `ref_date` value is public.
+fast = pd.DataFrame({"ref_date": dates, "vintage": dates, "fast": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]})
+slow = pd.DataFrame({"ref_date": dates, "vintage": dates, "slow": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]})
+
+# Give `slow` a one-month publication lag by shifting only its vintage stamps.
+slow = slow.assign(vintage=slow["vintage"] + pd.DateOffset(months=1))
+
+view = TimeSeriesView(
+    returns,
+    blocks=[VintagedBlock(fast, name="fast"), VintagedBlock(slow, name="slow")],
+)
+
+t = dates[2]                    # 2020-03-31, by which both blocks have released a vintage
+view.features_asof(t)           # array([ 3., 20.]) — fast at its March ref, slow at its February ref
+```
+
+Three properties follow from this design and are worth keeping in mind.
+
+**Resolution is block-level.** Every series inside one `VintagedBlock` shares that block's
+`(ref_date, vintage)` rows and resolves to a single real-time edge row. A block therefore cannot
+hold two series that need different lags — split them into separate blocks, as above.
+
+**The warm-up fails loudly.** `features_asof(t)` raises `KeyError` while *any* block has no vintage
+released as of `t`, so the most heavily lagged series sets the earliest usable decision time. Rather
+than catching that error, size the backtest's start date — or the splitter's minimum training
+window — past the longest warm-up.
+
+**The real-time edge is ragged.** At a single decision time, differently lagged blocks resolve to
+different reference dates: above, `fast` reports its March value while `slow`, one month behind, can
+only report February. The feature vector legitimately mixes reference periods, exactly as a
+real-time data feed does, so estimated loadings should be read with that mixture in mind.
+
+One reproducibility caveat. A `vintage` shift written inline in exploratory code is invisible to the
+run's provenance — the `config_hash` and `data_vintage` stamps carried on every result row will not
+reflect it. When a lag choice affects reported results, move the shift into a data-preparation step
+whose parameters enter the recorded configuration (for example, a
+[`numeraire-dataset`](https://github.com/py-numeraire/numeraire-dataset) recipe), so the reported
+numbers remain reproducible from their provenance alone.
+
 ### The `(t, t+h]` pairing convention
 
 The single convention every driver and evaluator obeys: features known **as of** `t` are paired
