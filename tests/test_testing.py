@@ -237,6 +237,29 @@ class _WarmStart:
         return _WarmStartModel(frame)
 
 
+class _IdCachedWarmStart:
+    """Warm-starts across fits but memoizes its output by ``id(view)``.
+
+    Refitting the SAME sub-view object would replay the memoized first output and look
+    independent; only a freshly rebuilt, content-equal sub-view exposes the warm-start. This is
+    the false negative the fresh-second-sub-view step of ``check_fit_independence`` closes.
+    """
+
+    def __init__(self) -> None:
+        self._prev: np.ndarray | None = None
+        self._by_id: dict[int, pd.DataFrame] = {}
+
+    def fit(self, view: TimeSeriesView) -> _WarmStartModel:
+        key = id(view)
+        if key not in self._by_id:
+            mean = view.returns_frame().to_numpy(np.float64).mean(axis=0)
+            blended = mean if self._prev is None else 0.5 * mean + 0.5 * self._prev
+            self._prev = mean
+            rows = np.tile(blended, (len(view.calendar), 1))
+            self._by_id[key] = pd.DataFrame(rows, index=view.calendar, columns=view.assets)
+        return _WarmStartModel(self._by_id[key])
+
+
 def test_stateless_baselines_pass_fit_independence() -> None:
     check_fit_independence(EqualWeight(), _ts_returns_only)
     check_fit_independence(MinVariance(), _ts_returns_only)
@@ -250,6 +273,13 @@ def test_warm_start_estimator_fails_fit_independence() -> None:
     # and the full battery surfaces the same failure
     with pytest.raises(AssertionError, match="carries state across fits"):
         check_estimator(_WarmStart(), _ts_returns_only, min_train=24)
+
+
+def test_id_cached_warm_start_fails_fit_independence() -> None:
+    # memoizing by view identity must not fake independence: the check's second sub-view is a
+    # fresh (content-equal) object, so the id-keyed cache misses and the warm-start surfaces
+    with pytest.raises(AssertionError, match="carries state across fits"):
+        check_fit_independence(_IdCachedWarmStart(), _ts_returns_only)
 
 
 def test_perturb_after_rejects_unknown_view() -> None:

@@ -8,6 +8,9 @@ returns the matching Output; ``in_sample=True`` selects the in-sample pricing pa
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Iterator
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -35,6 +38,11 @@ from numeraire import (
 )
 from numeraire.core import capabilities
 from numeraire.core.data import CrossSectionView, TimeSeriesView
+from numeraire.core.engine import (
+    _FORECAST_DEFAULT_MIN_TRAIN,
+    backtest_forecast,
+    backtest_weights,
+)
 from numeraire.core.splitter import WalkForwardSplitter
 
 # -- toy estimators (one per dispatchable capability + edge cases) ---------------------------------
@@ -256,6 +264,58 @@ def test_probe_fit_window_kwarg_rolls_the_prefix() -> None:
     backtest(est, view, method="f", window=18)
     # With a rolling ``window`` the warm-up ends at the window-th step (mirrors backtest_forecast).
     assert est.fit_max_dates[0] == view.calendar[18 - 1]
+
+
+class _OneShotSplitter:
+    """Adversarial splitter: ``split()`` returns one stored iterator, usable exactly once.
+
+    A second ``split()`` call would find the iterator already exhausted — the probe must therefore
+    materialize the folds once and replay them to the driver, or fold 0 silently disappears.
+    """
+
+    def __init__(self, inner: WalkForwardSplitter, view: TimeSeriesView) -> None:
+        self._it: Iterator[tuple[TimeSeriesView, TimeSeriesView]] = inner.split(view)
+        self.calls = 0
+
+    def split(self, view: TimeSeriesView) -> Iterator[tuple[TimeSeriesView, TimeSeriesView]]:
+        self.calls += 1
+        return self._it
+
+
+def test_one_shot_splitter_loses_no_folds() -> None:
+    view = _ts_view()
+    one_shot = _OneShotSplitter(_splitter(), view)
+    out = backtest(_WeightsEst(), view, one_shot, method="w")
+    assert isinstance(out, WeightsOutput)
+    # the user splitter's split() ran exactly once (probe + driver share the materialized folds)
+    assert one_shot.calls == 1
+    # every fold survives: identical output to the direct driver run with a fresh splitter
+    direct = backtest_weights(_WeightsEst(), _ts_view(), _splitter(), method="w")
+    assert len(out.weights) == len(direct.weights)
+    pd.testing.assert_frame_equal(out.weights, direct.weights)
+
+
+def test_probe_short_view_matches_driver_empty_output() -> None:
+    # 12 dates < the default min_train=20: the driver yields zero forecast origins (empty output);
+    # the probe must not die on the warm-up indexing where the driver itself would succeed.
+    view = make_monthly_view(n=12, n_assets=3)
+    out = backtest(_ForecastEst(), view, method="f")
+    assert isinstance(out, ForecastOutput)
+    direct = backtest_forecast(_ForecastEst(), make_monthly_view(n=12, n_assets=3), method="f")
+    assert out.forecasts.empty and direct.forecasts.empty
+
+
+def test_panel_window_kwarg_without_splitter_still_raises_cleanly() -> None:
+    # CrossSectionView has window() but no tail(): the probe must not crash on the rolling-tail
+    # step before the dispatch surfaces the real error (walk-forward weights need a splitter).
+    with pytest.raises(TypeError, match="requires a `splitter`"):
+        backtest(_PanelEst(), _panel_view(), method="panel", window=6)
+
+
+def test_forecast_default_min_train_constant_stays_in_sync() -> None:
+    # drift guard: the probe's fallback warm-up must equal backtest_forecast's min_train default
+    default = inspect.signature(backtest_forecast).parameters["min_train"].default
+    assert default == _FORECAST_DEFAULT_MIN_TRAIN
 
 
 # -- deprecated aliases: still work AND emit DeprecationWarning ------------------------------------

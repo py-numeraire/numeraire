@@ -11,9 +11,10 @@ Versions are tag-driven (`hatch-vcs`).
 ### Added
 
 - `numeraire.testing.check_fit_independence` — a conformance check that an estimator's output on a
-  view is independent of any earlier fit on different data (fit a prefix, fit the full view, refit
-  the prefix, require the two prefix outputs to be identical). Catches warm-start / cached-statistic
-  state that leaks across fits. Added to the default `check_estimator` battery.
+  view is independent of any earlier fit on different data (fit a prefix, fit the full view, refit a
+  freshly rebuilt content-equal prefix, require the two prefix outputs to be bit-identical). Catches
+  warm-start / cached-statistic state that leaks across fits, including caches keyed on view
+  identity. Added to the default `check_estimator` battery.
 - Property-based no-look-ahead tests for the timestamp-`asof` availability layer (`VintagedBlock`
   and `CharBlock` vintaged mode), checked against an independent brute-force oracle over irregular
   calendars, long publication lags and intra-period stamps.
@@ -25,7 +26,9 @@ Versions are tag-driven (`hatch-vcs`).
   whole view (in-sample) — instead of always fitting the full sample. Fitting the full view ahead
   of a walk-forward run let a stateful estimator observe post-train data while its capabilities were
   being read, a silent look-ahead channel; the probe now stays within the same information set the
-  driver's first fit uses. Output is unchanged for stateless estimators.
+  driver's first fit uses. The user splitter's `split(view)` is consulted exactly once (its folds
+  are materialized and replayed to the driver), so a splitter whose `split` returns a one-shot
+  iterator loses no folds. Output is unchanged for stateless estimators.
 - **Breaking — point-in-time availability is now a real-timestamp comparison.** `VintagedBlock` and
   `CharBlock` previously decided what was "known" by comparing calendar *month ordinals*, so a row
   or release stamped later in the same month counted as already available — a silent intra-month

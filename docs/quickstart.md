@@ -67,8 +67,8 @@ result = backtest(
 ```
 
 For an explicit return type (or to skip the probe fit `backtest` uses to read capabilities —
-it fits the selected driver's first train window, never the full sample), call the typed driver
-directly — {func}`~numeraire.core.engine.backtest_weights`
+it fits the selected driver's first train window, never the full sample ahead of a walk-forward
+run), call the typed driver directly — {func}`~numeraire.core.engine.backtest_weights`
 here; {func}`~numeraire.core.engine.backtest_forecast`,
 {func}`~numeraire.core.engine.backtest_panel` and {func}`~numeraire.core.engine.backtest_pricing`
 are its siblings.

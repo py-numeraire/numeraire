@@ -132,7 +132,8 @@ def test_vintaged_block_matches_oracle(records: list[Record]) -> None:
                 block.asof(t)
         else:
             assert block.is_ready(t)
-            assert float(block.asof(t)[0]) == pytest.approx(expected)
+            # exact equality: PIT resolution transports a stored value, it does no arithmetic
+            assert float(block.asof(t)[0]) == expected
 
 
 @settings(max_examples=120, deadline=None, suppress_health_check=[HealthCheck.too_slow])
@@ -218,7 +219,8 @@ def test_char_block_vintaged_matches_oracle_per_asset(
             if expected is None:
                 assert np.isnan(got), f"{asset} at {t}: expected nothing available, got {got}"
             else:
-                assert got == pytest.approx(expected)
+                # exact equality: PIT resolution transports a stored value, no arithmetic
+                assert got == expected
 
 
 @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
