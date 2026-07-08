@@ -20,7 +20,7 @@ import hashlib
 import json
 import os
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, ParamSpec, TypeVar, cast
@@ -659,6 +659,65 @@ def backtest_pricing_in_sample(
 
 _DISPATCH_CAPS = (capabilities.TO_WEIGHTS, capabilities.TO_FORECAST, capabilities.TO_PRICING)
 
+_FORECAST_DEFAULT_MIN_TRAIN = 20  # keep in sync with backtest_forecast's ``min_train`` default
+
+
+class _ReplaySplitter:
+    """Replays folds already materialized from a user splitter (whose ``split`` ran exactly once).
+
+    ``backtest`` needs the first fold's train view for the capability probe *and* the driver needs
+    every fold. Calling the user splitter's ``split(view)`` twice would silently drop fold 0 when
+    ``split`` returns a one-shot iterator, so the folds are materialized once and replayed through
+    this stand-in. The drivers materialize the folds anyway (``list(splitter.split(view))``), so no
+    laziness is lost.
+    """
+
+    def __init__(self, folds: list[tuple[Any, Any]]) -> None:
+        self._folds = folds
+
+    def split(self, view: Any) -> Iterator[tuple[Any, Any]]:
+        return iter(self._folds)
+
+
+def _probe_plan(
+    view: Any, splitter: Any, in_sample: bool, kwargs: dict[str, Any]
+) -> tuple[Any, Any]:
+    """The ``(probe view, splitter)`` pair ``backtest`` uses: what to probe-fit on, what to forward.
+
+    The probe view reproduces **the first fit the selected driver would itself perform**, never the
+    full ``view`` ahead of a walk-forward run: a stateful estimator (a warm start, a cached
+    statistic) must not observe post-train data while its capabilities are being read, or the
+    capability probe becomes a contamination channel into the walk-forward loop. The three cases
+    mirror the drivers exactly:
+
+    - ``in_sample=True`` — the in-sample pricing driver fits the whole ``view``, so the probe does
+      too (there is no earlier train window to isolate).
+    - a ``splitter`` is given — the walk-forward drivers fit each fold's train window; the probe
+      fits the **first** fold's train view. The user splitter's ``split(view)`` runs **exactly
+      once**: the folds are materialized here and the driver receives a :class:`_ReplaySplitter`
+      over them, so a one-shot ``split`` iterator loses no folds. If the splitter yields no folds
+      the driver never fits — nothing exists to contaminate — and the probe falls back to ``view``.
+    - no ``splitter`` — the forecast driver's first fit is its warm-up prefix; the probe rebuilds
+      exactly that window (the first ``window``/``min_train`` calendar steps, rolled to ``window``
+      when the view supports a rolling tail). A view shorter than the warm-up yields zero forecast
+      origins in the driver, so — as in the empty-folds case — no result exists to contaminate and
+      the probe falls back to ``view``.
+    """
+    if in_sample:
+        return view, splitter
+    if splitter is not None:
+        folds = list(splitter.split(view))  # the user splitter's split() runs exactly once
+        probe = view if not folds else folds[0][0]
+        return probe, _ReplaySplitter(folds)
+    window = kwargs.get("window")
+    warmup = window if window is not None else kwargs.get("min_train", _FORECAST_DEFAULT_MIN_TRAIN)
+    if warmup >= len(view.calendar):
+        return view, None  # driver produces zero origins: no result exists to contaminate
+    probe = view.window(view.calendar[warmup - 1])
+    if window is not None and hasattr(probe, "tail"):
+        probe = probe.tail(window)
+    return probe, None
+
 
 def backtest(
     estimator: Estimator,
@@ -689,19 +748,29 @@ def backtest(
     ``in_sample=True`` selects the single-full-sample-fit pricing path (explanatory in-sample R^2)
     and requires a ``to_pricing`` model. Every other path is walk-forward.
 
-    To read the capabilities the model must first be fitted, so ``backtest`` does **one inspection
-    fit on the full ``view``** and then delegates to the driver (which re-fits per fold / on the
-    full sample as its discipline requires). The extra fit is intentional and cheap relative to a
-    full walk-forward; power users who want to skip it — or who need the precise return type — can
-    call the typed driver (``backtest_weights`` / ``backtest_forecast`` / ``backtest_panel`` /
-    ``backtest_pricing`` / ``backtest_pricing_in_sample``) directly.
+    To read the capabilities the model must first be fitted, so ``backtest`` does **one probe fit**
+    before delegating. That probe fits on exactly the data the selected driver's *first* fit would
+    see — the first fold's train window (walk-forward), the warm-up prefix (forecast), or the whole
+    ``view`` (in-sample) — **never the full sample ahead of a walk-forward run**. This matters for a
+    stateful estimator: fitting the probe on the full ``view`` would let it observe post-train data
+    before the per-fold fits, a silent look-ahead channel; mirroring the first fold keeps the probe
+    within the same information set the driver's first fit uses. A user splitter's ``split(view)``
+    is called exactly once (its folds are replayed to the driver), so a one-shot ``split`` iterator
+    loses no folds. The extra fit is intentional and
+    cheap relative to a full walk-forward; power users who want to skip it — or who need the precise
+    return type — can call the typed driver (``backtest_weights`` / ``backtest_forecast`` /
+    ``backtest_panel`` / ``backtest_pricing`` / ``backtest_pricing_in_sample``) directly.
 
     A model advertising more than one of the three dispatchable capabilities is **ambiguous** and
     raises ``TypeError`` — call the specific typed driver in that case. Extra keyword arguments
     (``min_train``, ``window``, ``refit_every``, ``config``, ``data_vintage``, ``run_id``,
     ``n_jobs``, ...) are forwarded to the selected driver.
     """
-    model = estimator.fit(view)  # one inspection fit to read the model's capabilities
+    # Probe fit on the same data the selected driver's first fit would see (never the full sample
+    # ahead of a walk-forward run), so a stateful estimator can't observe post-train data here.
+    # A user splitter is materialized once and replayed to the driver (one-shot split() safe).
+    probe, splitter = _probe_plan(view, splitter, in_sample, kwargs)
+    model = estimator.fit(probe)
     caps = set(model.capabilities()) & set(_DISPATCH_CAPS)
 
     if in_sample:

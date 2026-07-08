@@ -8,6 +8,9 @@ returns the matching Output; ``in_sample=True`` selects the in-sample pricing pa
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Iterator
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -35,6 +38,11 @@ from numeraire import (
 )
 from numeraire.core import capabilities
 from numeraire.core.data import CrossSectionView, TimeSeriesView
+from numeraire.core.engine import (
+    _FORECAST_DEFAULT_MIN_TRAIN,
+    backtest_forecast,
+    backtest_weights,
+)
 from numeraire.core.splitter import WalkForwardSplitter
 
 # -- toy estimators (one per dispatchable capability + edge cases) ---------------------------------
@@ -135,6 +143,26 @@ class _NoCapEst:
         return _NoCapModel()
 
 
+class _RecordingWeightsEst:
+    """Records the max calendar date of every view it is fitted on (to inspect the probe fit)."""
+
+    def __init__(self) -> None:
+        self.fit_max_dates: list[pd.Timestamp] = []
+
+    def fit(self, view: TimeSeriesView) -> _WeightsModel:
+        self.fit_max_dates.append(view.calendar.max())
+        return _WeightsModel()
+
+
+class _RecordingForecastEst:
+    def __init__(self) -> None:
+        self.fit_max_dates: list[pd.Timestamp] = []
+
+    def fit(self, view: TimeSeriesView) -> _ForecastModel:
+        self.fit_max_dates.append(view.calendar.max())
+        return _ForecastModel()
+
+
 def _ts_view() -> TimeSeriesView:
     return make_monthly_view(n=120, n_assets=3)
 
@@ -200,6 +228,94 @@ def test_backtest_raises_on_ambiguous_multiple_capabilities() -> None:
 def test_backtest_in_sample_requires_pricing() -> None:
     with pytest.raises(TypeError, match="does not support 'to_pricing'"):
         backtest(_WeightsEst(), _ts_view(), _splitter(), method="w", in_sample=True)
+
+
+# -- probe fit sees only the driver's first train window, never the full sample -------------------
+
+
+def test_probe_fit_sees_only_first_fold_train_weights() -> None:
+    view = _ts_view()
+    sp = _splitter()  # min_train=60, test_size=12
+    est = _RecordingWeightsEst()
+    out = backtest(est, view, sp, method="w")
+    assert isinstance(out, WeightsOutput)
+    # The probe fit (the first recorded fit) sees exactly the first fold's train window ...
+    first_train_end = next(iter(sp.split(view)))[0].calendar.max()
+    probe_max = est.fit_max_dates[0]
+    assert probe_max == first_train_end
+    # ... and never the full sample (that would be a look-ahead channel for a stateful estimator).
+    assert probe_max < view.calendar.max()
+
+
+def test_probe_fit_sees_only_warmup_prefix_forecast() -> None:
+    view = _ts_view()
+    est = _RecordingForecastEst()
+    out = backtest(est, view, method="f", min_train=24)
+    assert isinstance(out, ForecastOutput)
+    probe_max = est.fit_max_dates[0]
+    # The probe window is exactly the first ``min_train`` calendar steps.
+    assert probe_max == view.calendar[24 - 1]
+    assert probe_max < view.calendar.max()
+
+
+def test_probe_fit_window_kwarg_rolls_the_prefix() -> None:
+    view = _ts_view()
+    est = _RecordingForecastEst()
+    backtest(est, view, method="f", window=18)
+    # With a rolling ``window`` the warm-up ends at the window-th step (mirrors backtest_forecast).
+    assert est.fit_max_dates[0] == view.calendar[18 - 1]
+
+
+class _OneShotSplitter:
+    """Adversarial splitter: ``split()`` returns one stored iterator, usable exactly once.
+
+    A second ``split()`` call would find the iterator already exhausted — the probe must therefore
+    materialize the folds once and replay them to the driver, or fold 0 silently disappears.
+    """
+
+    def __init__(self, inner: WalkForwardSplitter, view: TimeSeriesView) -> None:
+        self._it: Iterator[tuple[TimeSeriesView, TimeSeriesView]] = inner.split(view)
+        self.calls = 0
+
+    def split(self, view: TimeSeriesView) -> Iterator[tuple[TimeSeriesView, TimeSeriesView]]:
+        self.calls += 1
+        return self._it
+
+
+def test_one_shot_splitter_loses_no_folds() -> None:
+    view = _ts_view()
+    one_shot = _OneShotSplitter(_splitter(), view)
+    out = backtest(_WeightsEst(), view, one_shot, method="w")
+    assert isinstance(out, WeightsOutput)
+    # the user splitter's split() ran exactly once (probe + driver share the materialized folds)
+    assert one_shot.calls == 1
+    # every fold survives: identical output to the direct driver run with a fresh splitter
+    direct = backtest_weights(_WeightsEst(), _ts_view(), _splitter(), method="w")
+    assert len(out.weights) == len(direct.weights)
+    pd.testing.assert_frame_equal(out.weights, direct.weights)
+
+
+def test_probe_short_view_matches_driver_empty_output() -> None:
+    # 12 dates < the default min_train=20: the driver yields zero forecast origins (empty output);
+    # the probe must not die on the warm-up indexing where the driver itself would succeed.
+    view = make_monthly_view(n=12, n_assets=3)
+    out = backtest(_ForecastEst(), view, method="f")
+    assert isinstance(out, ForecastOutput)
+    direct = backtest_forecast(_ForecastEst(), make_monthly_view(n=12, n_assets=3), method="f")
+    assert out.forecasts.empty and direct.forecasts.empty
+
+
+def test_panel_window_kwarg_without_splitter_still_raises_cleanly() -> None:
+    # CrossSectionView has window() but no tail(): the probe must not crash on the rolling-tail
+    # step before the dispatch surfaces the real error (walk-forward weights need a splitter).
+    with pytest.raises(TypeError, match="requires a `splitter`"):
+        backtest(_PanelEst(), _panel_view(), method="panel", window=6)
+
+
+def test_forecast_default_min_train_constant_stays_in_sync() -> None:
+    # drift guard: the probe's fallback warm-up must equal backtest_forecast's min_train default
+    default = inspect.signature(backtest_forecast).parameters["min_train"].default
+    assert default == _FORECAST_DEFAULT_MIN_TRAIN
 
 
 # -- deprecated aliases: still work AND emit DeprecationWarning ------------------------------------

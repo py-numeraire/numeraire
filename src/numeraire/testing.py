@@ -25,6 +25,10 @@ equivalent view each call — synthetic data with a fixed seed):
   ``view.assets``; pricing ``expected_returns`` is a ``(date x asset)`` frame with columns ⊆
   ``view.assets`` and index ⊆ ``view.calendar``.
 - :func:`check_determinism` — same estimator + same view ⇒ identical output, twice.
+- :func:`check_fit_independence` — an estimator's output on a view is invariant to an earlier fit
+  on different data: fit a prefix, fit the full view (the contaminant), refit a freshly rebuilt
+  content-equal prefix, and require the two prefix outputs to be bit-identical. A warm-start /
+  cached-statistic leak fails here (including one keyed on view identity).
 - :func:`check_no_lookahead` — the property test **for ``to_weights`` and ``expected_returns``**.
   Both hand the model a multi-date view and require it to window internally, so its rows up to ``t``
   must be **invariant to mutating data strictly after ``t``**; a model that peeks past a prediction
@@ -73,6 +77,7 @@ __all__ = [
     "check_determinism",
     "check_engine_roundtrip",
     "check_estimator",
+    "check_fit_independence",
     "check_no_lookahead",
     "check_output_shapes",
 ]
@@ -160,6 +165,30 @@ def _assert_weights_equal_on_common(
         arr_b = b.loc[idx, cols].to_numpy(np.float64)
     _assert_finite_present(arr_a, msg)
     np.testing.assert_allclose(arr_a, arr_b, rtol=1e-9, atol=1e-12, equal_nan=True, err_msg=msg)
+
+
+def _assert_bit_identical(
+    a: pd.DataFrame | pd.Series, b: pd.DataFrame | pd.Series, msg: str
+) -> None:
+    """Exact comparison for the fit-independence contract: labels equal, values bit-identical.
+
+    Unlike the tolerance-based common-label comparison used by the determinism check, this demands
+    the second output carry **exactly** the first's index (and columns, for a frame) and exactly
+    equal values (``NaN`` matching ``NaN``): a fit that is truly independent of estimator history
+    recomputes the identical result, so any drift — a shifted label set or a last-bit value change —
+    is evidence of state carried across fits.
+    """
+    assert type(a) is type(b), (
+        f"{msg}: output type changed ({type(a).__name__} -> {type(b).__name__})"
+    )
+    assert a.index.equals(b.index), f"{msg}: output index labels changed"
+    if isinstance(a, pd.DataFrame):
+        assert isinstance(b, pd.DataFrame)
+        assert a.columns.equals(b.columns), f"{msg}: output column labels changed"
+    arr_a = a.to_numpy(np.float64)
+    arr_b = b.to_numpy(np.float64)
+    _assert_finite_present(arr_a, msg)
+    assert np.array_equal(arr_a, arr_b, equal_nan=True), msg
 
 
 def _perturb_after(view: Any, t: pd.Timestamp) -> Any:
@@ -287,6 +316,54 @@ def check_determinism(estimator: Any, view_factory: ViewFactory) -> None:
         )
 
 
+def check_fit_independence(estimator: Any, view_factory: ViewFactory) -> None:
+    """An estimator's fit output on a view is independent of any earlier fit on different data.
+
+    A stateful estimator that carries information across fits — a warm start seeded from the last
+    fit, a cached statistic blended into the next one — would score differently inside a
+    walk-forward loop depending on the order the folds were fitted in, a subtle look-ahead-flavoured
+    contamination that ordinary shape / determinism checks miss. This probes it with a single
+    instance (we cannot clone an arbitrary estimator): fit a prefix sub-view and snapshot its
+    extractable output, perform a *contaminating* fit on the full view, refit a **freshly rebuilt**
+    but content-equal prefix sub-view (a different object, so a cache keyed on view identity cannot
+    fake independence), and require the two sub-view outputs to be **bit-identical** — labels equal
+    and values exactly equal, with ``NaN`` matching ``NaN``. A model that leaks state across fits
+    produces a different second output and fails here.
+    """
+    full = view_factory()
+    cal = full.calendar
+    assert len(cal) >= 4, "check_fit_independence needs a view with >= 4 calendar dates"
+    t = cal[_origin_index(full, 0.65)]  # a strict prefix (~65% of the calendar)
+    sub = full.window(t)
+    # The FIRST fit is the measured sub-view fit, on a fresh estimator — reading capabilities from
+    # a preceding full-view fit would prime any across-fit state to the same value the contaminating
+    # fit sets, hiding a "cache the last fit" leak. Snapshot every extractable output of this first
+    # fit before any other fit runs.
+    m1 = _fit(estimator, sub)
+    ext = _extractable(_caps(m1))
+    if not ext:
+        return  # capability-only method: no crystallized surface to compare
+    d = sub.calendar[_origin_index(sub)]
+    w1 = _weights(m1, sub).copy() if capabilities.TO_WEIGHTS in ext else None
+    f1 = m1.forecast(sub.window(d)).copy() if capabilities.TO_FORECAST in ext else None
+    p1 = _expected_returns(m1, sub).copy() if capabilities.TO_PRICING in ext else None
+    _fit(estimator, view_factory())  # contaminating fit on the different, longer full view
+    # Refit a content-equal but freshly built sub-view: an estimator caching by view identity
+    # (id(view)) would trivially reproduce the first output on the SAME object and mask the leak.
+    sub2 = view_factory().window(t)
+    m2 = _fit(estimator, sub2)
+    msg = (
+        "fit output on a sub-view changed after an intervening fit on different data — the "
+        "estimator carries state across fits (warm start / cached statistic)"
+    )
+    if w1 is not None:
+        _assert_bit_identical(w1, _weights(m2, sub2), msg)
+    if f1 is not None:
+        _assert_bit_identical(f1, m2.forecast(sub2.window(d)), msg)
+    if p1 is not None:
+        _assert_bit_identical(p1, _expected_returns(m2, sub2), msg)
+
+
 def check_no_lookahead(estimator: Any, view_factory: ViewFactory) -> None:
     """``to_weights`` / ``expected_returns`` up to ``t`` are invariant to mutating data after ``t``.
 
@@ -405,6 +482,10 @@ def check_estimator(
         Forwarded to :func:`check_engine_roundtrip` to size the walk-forward run for the fixture
         (e.g. a small ``min_train`` for a short synthetic view).
     """
+    # Fit-independence runs first, while the estimator is still fresh: it detects across-fit state
+    # by comparing two fits of the same sub-view around a contaminating fit, so a prior check that
+    # already fitted the estimator could prime that state and mask the leak.
+    check_fit_independence(estimator, view_factory)
     check_capabilities(estimator, view_factory)
     check_output_shapes(estimator, view_factory)
     check_determinism(estimator, view_factory)

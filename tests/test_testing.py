@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from numeraire.baselines import EqualWeight, HistoricalMean, MeanVariance, MinVariance
 from numeraire.core import capabilities
 from numeraire.core.data import CrossSectionView, TimeSeriesView
 from numeraire.core.engine import backtest_forecast
@@ -19,6 +20,7 @@ from numeraire.testing import (
     _perturb_after,
     check_capabilities,
     check_estimator,
+    check_fit_independence,
     check_no_lookahead,
 )
 
@@ -198,6 +200,86 @@ def test_leaky_pricing_estimator_fails_no_lookahead() -> None:
         check_no_lookahead(_LeakyPricing(), _ts_returns_only)
     with pytest.raises(AssertionError, match="look-ahead"):
         check_estimator(_LeakyPricing(), _ts_returns_only, min_train=24)
+
+
+# -- fit-independence: stateless estimators pass, a warm-start estimator fails -----------------
+
+
+class _WarmStartModel:
+    """Holds a weight frame precomputed at fit time (so calling it never re-reads live state)."""
+
+    def __init__(self, weights: pd.DataFrame) -> None:
+        self._w = weights
+
+    def capabilities(self) -> set[str]:
+        return {capabilities.TO_WEIGHTS}
+
+    def to_weights(self, view: TimeSeriesView) -> pd.DataFrame:
+        return self._w.reindex(index=view.calendar, columns=view.assets)
+
+
+class _WarmStart:
+    """Stateful: blends the PREVIOUS fit's mean return into this fit's weights (a warm start).
+
+    Its output therefore depends on what it was fit on before — exactly the across-fit
+    contamination ``check_fit_independence`` exists to catch.
+    """
+
+    def __init__(self) -> None:
+        self._prev: np.ndarray | None = None
+
+    def fit(self, view: TimeSeriesView) -> _WarmStartModel:
+        mean = view.returns_frame().to_numpy(np.float64).mean(axis=0)
+        blended = mean if self._prev is None else 0.5 * mean + 0.5 * self._prev
+        self._prev = mean
+        rows = np.tile(blended, (len(view.calendar), 1))
+        frame = pd.DataFrame(rows, index=view.calendar, columns=view.assets)
+        return _WarmStartModel(frame)
+
+
+class _IdCachedWarmStart:
+    """Warm-starts across fits but memoizes its output by ``id(view)``.
+
+    Refitting the SAME sub-view object would replay the memoized first output and look
+    independent; only a freshly rebuilt, content-equal sub-view exposes the warm-start. This is
+    the false negative the fresh-second-sub-view step of ``check_fit_independence`` closes.
+    """
+
+    def __init__(self) -> None:
+        self._prev: np.ndarray | None = None
+        self._by_id: dict[int, pd.DataFrame] = {}
+
+    def fit(self, view: TimeSeriesView) -> _WarmStartModel:
+        key = id(view)
+        if key not in self._by_id:
+            mean = view.returns_frame().to_numpy(np.float64).mean(axis=0)
+            blended = mean if self._prev is None else 0.5 * mean + 0.5 * self._prev
+            self._prev = mean
+            rows = np.tile(blended, (len(view.calendar), 1))
+            self._by_id[key] = pd.DataFrame(rows, index=view.calendar, columns=view.assets)
+        return _WarmStartModel(self._by_id[key])
+
+
+def test_stateless_baselines_pass_fit_independence() -> None:
+    check_fit_independence(EqualWeight(), _ts_returns_only)
+    check_fit_independence(MinVariance(), _ts_returns_only)
+    check_fit_independence(MeanVariance(), _ts_returns_only)
+    check_fit_independence(HistoricalMean(), _ts_with_features)
+
+
+def test_warm_start_estimator_fails_fit_independence() -> None:
+    with pytest.raises(AssertionError, match="carries state across fits"):
+        check_fit_independence(_WarmStart(), _ts_returns_only)
+    # and the full battery surfaces the same failure
+    with pytest.raises(AssertionError, match="carries state across fits"):
+        check_estimator(_WarmStart(), _ts_returns_only, min_train=24)
+
+
+def test_id_cached_warm_start_fails_fit_independence() -> None:
+    # memoizing by view identity must not fake independence: the check's second sub-view is a
+    # fresh (content-equal) object, so the id-keyed cache misses and the warm-start surfaces
+    with pytest.raises(AssertionError, match="carries state across fits"):
+        check_fit_independence(_IdCachedWarmStart(), _ts_returns_only)
 
 
 def test_perturb_after_rejects_unknown_view() -> None:
