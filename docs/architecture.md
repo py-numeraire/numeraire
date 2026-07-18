@@ -169,11 +169,33 @@ consuming its own up-to-date point-in-time window. All drivers accept `n_jobs` t
 independent folds over a thread pool; the mapping is order-preserving, so a parallel run is
 identical to the serial one.
 
+For weight backtests, a model's target decision and the weights used to score an incomplete return
+cross-section are deliberately separate. {class}`~numeraire.core.engine.WeightsOutput` and
+{class}`~numeraire.core.engine.PanelWeightsOutput` always retain the original target in `weights`;
+exposure, turnover, and weight plots consume that target. The `missing_returns` policy controls only
+realized P&L, and {meth}`~numeraire.core.engine.WeightsOutput.scoring_weights` exposes its effective
+ex-post weights for audit:
+
+- `"error"` (default) fails closed when a non-zero holding has a non-finite return;
+- `"zero"` explicitly scores the unavailable held return as zero;
+- `"renormalize_legs"` separately rescales the observed positive and negative legs back to their
+  original exposures, and errors if an entire non-empty leg is unavailable.
+
+The weight drivers include the policy in `config_hash` and output metadata. A manually constructed
+output still carries the policy field but is responsible for its own provenance metadata. Drivers
+remove only the structural tail whose full forecast horizon lies beyond the input calendar; an
+earlier missing asset, gap, or all-missing cross-section remains visible to the selected policy.
+Delisting returns therefore belong upstream in the dataset rather than being guessed by the engine.
+
 The `(train, test)` folds come from a **splitter**. The bundled
 {class}`~numeraire.core.splitter.WalkForwardSplitter` yields expanding- or rolling-window folds and
 supports an `embargo` gap on top of the automatic horizon purge; anything with a compatible `split`
 method (including a wrapped scikit-learn splitter) works. {func}`~numeraire.core.splitter.validation_split`
 carves a point-in-time `(fit, valid)` split *inside* a train fold for hyper-parameter tuning.
+Custom splitters are a trusted boundary: they must preserve the original view type, source and
+`horizon`, keep test dates inside the original calendar, and make every test interval strictly later
+than its train interval. The engine validates model outputs against the handed test calendar, but it
+cannot prove that an arbitrary splitter constructed its views from the same underlying source.
 
 ## Evaluators and the result schema
 

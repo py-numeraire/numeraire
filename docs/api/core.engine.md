@@ -17,6 +17,7 @@
    backtest_pricing
    backtest_pricing_in_sample
    config_hash
+   MissingReturnPolicy
    WeightsOutput
    PanelWeightsOutput
    ForecastOutput

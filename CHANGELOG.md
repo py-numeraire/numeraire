@@ -10,6 +10,11 @@ Versions are tag-driven (`hatch-vcs`).
 
 ### Added
 
+- `MissingReturnPolicy` and `WeightsOutput.scoring_weights()` /
+  `PanelWeightsOutput.scoring_weights()` make incomplete-return scoring explicit and auditable.
+  `"renormalize_legs"` preserves the original positive and negative target exposures separately;
+  driver-produced output metadata records the policy, missing held observations, affected dates,
+  and re-normalized dates.
 - `assign_portfolio_bins` and `aggregate_assigned_portfolios` expose portfolio formation and
   holding-period aggregation as separate, testable steps. `SortAssignments` carries the frozen
   formation membership and its breakpoints; `sort_portfolios` remains the convenience wrapper.
@@ -24,6 +29,14 @@ Versions are tag-driven (`hatch-vcs`).
 
 ### Changed
 
+- **Breaking — weight backtests now fail closed on a missing held return.** `backtest_weights` and
+  `backtest_panel` default to `missing_returns="error"`; callers must explicitly choose `"zero"` or
+  `"renormalize_legs"` when a paper's convention requires it. The policy is included in
+  `config_hash`, so weight-run hashes change even with an otherwise empty method config. The engine
+  now removes only a mechanically identified horizon tail, not earlier rows or assets merely because
+  their realized return is unavailable. `WeightsOutput.weights` and `PanelWeightsOutput.weights`
+  always remain the model's target decisions, so missingness can no longer silently alter exposure,
+  turnover, HHI, or weight plots. Non-finite target weights are rejected rather than treated as zero.
 - `backtest()` now performs its capability-probe fit on the selected driver's **first train
   window** — the first fold's train view (walk-forward), the warm-up prefix (forecast), or the
   whole view (in-sample) — instead of always fitting the full sample. Fitting the full view ahead

@@ -104,6 +104,7 @@ def test_weights_subset_columns_scored_by_label() -> None:
     pd.testing.assert_series_equal(
         full.strategy_returns(), subset.strategy_returns(), check_names=False
     )
+    assert bool((subset.weights["r2"] == 0.0).all())
 
 
 # -- dispatch guards (items 2 & 3) -----------------------------------------------------------------
@@ -178,3 +179,13 @@ def test_check_output_shapes_rejects_duplicate_weight_columns() -> None:
 
     with pytest.raises(AssertionError, match="unique labels"):
         testing.check_output_shapes(_DupEst(), _view)
+
+
+def test_check_output_shapes_rejects_nonfinite_target_weights() -> None:
+    """NaN is not an implicit zero-weight convention in the estimator contract."""
+    from numeraire import testing
+
+    assets = _view().assets
+    weights = {assets[0]: np.nan, assets[1]: 0.5, assets[2]: 0.5}
+    with pytest.raises(AssertionError, match="finite"):
+        testing.check_output_shapes(_AssetWeightEst(weights, assets), _view)

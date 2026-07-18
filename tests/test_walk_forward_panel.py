@@ -61,33 +61,44 @@ def _view() -> CrossSectionView:
 def test_walk_forward_panel_plumbing() -> None:
     v = _view()
     out = backtest_panel(
-        _XSEstimator(), v, WalkForwardSplitter(min_train=24, test_size=6), method="toy_fm"
+        _XSEstimator(),
+        v,
+        WalkForwardSplitter(min_train=24, test_size=6),
+        method="toy_fm",
+        missing_returns="zero",
     )
     assert isinstance(out, PanelWeightsOutput)
     assert out.capability == capabilities.TO_WEIGHTS
     assert out.run_id == f"toy_fm-{out.config_hash}"
-    # weights and realized share the (date, asset) key index; nothing unrealized survives
+    # Target keys survive even when their realized return is unavailable.  The explicit zero
+    # scoring convention affects only the payoff, not the recorded portfolio decision.
     assert out.weights.index.equals(out.realized.index)
     assert list(out.weights.index.names) == ["date", "asset"]
-    assert not out.realized.isna().to_numpy().any()
+    assert out.realized.isna().to_numpy().any()
+    pd.testing.assert_series_equal(out.scoring_weights(), out.weights)
 
 
 def test_strategy_returns_are_per_date() -> None:
     v = _view()
     out = backtest_panel(
-        _XSEstimator(), v, WalkForwardSplitter(min_train=24, test_size=6), method="toy_fm"
+        _XSEstimator(),
+        v,
+        WalkForwardSplitter(min_train=24, test_size=6),
+        method="toy_fm",
+        missing_returns="zero",
     )
     sr = out.strategy_returns()
-    # one portfolio return per rebalance date, matching the manual per-date sum of w * r
-    manual = (out.weights * out.realized).groupby(level="date").sum()
+    # One return per rebalance date.  Under the explicit zero convention, unavailable held returns
+    # contribute zero while target weights remain inspectable without ex-post alteration.
+    manual = (out.weights * out.realized.fillna(0.0)).groupby(level="date").sum()
     assert sr.index.equals(manual.index)
     np.testing.assert_allclose(sr.to_numpy(), manual.to_numpy())
     assert sr.index.is_monotonic_increasing
 
 
 def test_model_weights_are_dollar_neutral_at_formation() -> None:
-    # Neutrality holds on the model's raw cross-section; the engine may later drop a delisted name's
-    # weight (its forward return is unknowable), so post-purge sums need not be zero (correct).
+    # Neutrality is a property of the model's target decision.  A later missing-return scoring
+    # convention must not remove or otherwise rewrite these target weights.
     v = _view()
     model = _XSEstimator().fit(v)
     per_date = model.to_weights(v).groupby(level="date").sum()
@@ -97,8 +108,12 @@ def test_model_weights_are_dollar_neutral_at_formation() -> None:
 def test_panel_backtest_is_deterministic() -> None:
     v = _view()
     sp = WalkForwardSplitter(min_train=24, test_size=6)
-    a = backtest_panel(_XSEstimator(), v, sp, method="toy_fm").strategy_returns()
-    b = backtest_panel(_XSEstimator(), v, sp, method="toy_fm").strategy_returns()
+    a = backtest_panel(
+        _XSEstimator(), v, sp, method="toy_fm", missing_returns="zero"
+    ).strategy_returns()
+    b = backtest_panel(
+        _XSEstimator(), v, sp, method="toy_fm", missing_returns="zero"
+    ).strategy_returns()
     np.testing.assert_array_equal(a.to_numpy(), b.to_numpy())
 
 
@@ -111,8 +126,14 @@ def test_walk_forward_panel_with_char_block_end_to_end() -> None:
         pan, chars=["size", "bm", "mom"], char_blocks=[CharBlock(extra, ["lagsize"], lag=1)]
     )
     out = backtest_panel(
-        _XSEstimator(), v, WalkForwardSplitter(min_train=24, test_size=6), method="toy_fm_cb"
+        _XSEstimator(),
+        v,
+        WalkForwardSplitter(min_train=24, test_size=6),
+        method="toy_fm_cb",
+        missing_returns="zero",
     )
     assert isinstance(out, PanelWeightsOutput)
     assert not out.weights.empty
-    assert not out.realized.isna().to_numpy().any()
+    assert out.weights.index.equals(out.realized.index)
+    assert out.realized.isna().to_numpy().any()
+    pd.testing.assert_series_equal(out.scoring_weights(), out.weights)

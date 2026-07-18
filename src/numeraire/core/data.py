@@ -646,8 +646,8 @@ class CrossSectionView:
 
     - ``features_asof(t)`` returns the whole cross-section at ``t`` — ``(ids, X)`` with ``X`` shaped
       ``(n_alive x K)`` — rather than one shared vector.
-    - ``target_asof(t, h)`` returns each alive asset's return realized over ``(t, t+h]`` (``nan`` if
-      the asset delists before the horizon closes).
+    - ``target_asof(t, h)`` returns each alive asset's return realized over ``(t, t+h]`` (``nan`` on
+      an absent row, an input missing return, or an unrealized horizon tail).
     - ``aligned`` stacks every ``(date, asset)`` observation into a panel design matrix
       ``(N_obs x K)`` with a ``(N_obs,)`` target — the shape Fama-MacBeth / IPCA consume.
 
@@ -773,8 +773,10 @@ class CrossSectionView:
     def _compound(self, dpos: NDArray[np.int64], codes: NDArray[np.int32], h: int) -> Float:
         """Compounded ``(t, t+h]`` return per (date-position, asset-code) row; ``nan`` on any gap.
 
-        Vectorized over rows via the row-index matrix — an asset absent at any of the ``h``
-        forward steps (delisted / gap) yields ``nan``. The only Python loop is the horizon.
+        Vectorized over rows via the row-index matrix — an asset absent at any forward step (exit or
+        ordinary gap), or with a non-finite input return, yields ``nan``. The engine cannot infer a
+        delisting payoff from absence; data providers must merge it upstream. The only Python loop
+        is the horizon.
         """
         out = np.full(len(codes), np.nan, dtype=np.float64)
         live = np.flatnonzero(dpos + h < len(self._dates))
@@ -793,7 +795,7 @@ class CrossSectionView:
     def target_asof(
         self, t: object, horizon: int | None = None
     ) -> tuple[NDArray[np.object_], Float]:
-        """Per-asset return over ``(t, t+h]`` for the ``t`` cross-section; ``nan`` if it delists."""
+        """Per-asset ``(t, t+h]`` return; ``nan`` on a gap, missing input, or horizon tail."""
         h = self.horizon if horizon is None else horizon
         p = self._pos_asof(t)
         if p < 0:

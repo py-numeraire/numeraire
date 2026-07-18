@@ -20,10 +20,11 @@ equivalent view each call — synthetic data with a fixed seed):
 - :func:`check_capabilities` — ``fit`` returns a ``Model`` whose ``capabilities()`` intersect the
   core set ``{to_weights, to_forecast, to_pricing}``, and every *crystallized* capability it
   declares has its method (``to_weights`` / ``forecast`` / ``expected_returns``).
-- :func:`check_output_shapes` — weights columns ⊆ ``view.assets`` and index ⊆ ``view.calendar``
-  (wide) or a ``[date, asset]`` MultiIndex (panel); a forecast is a ``pd.Series`` indexed by
-  ``view.assets``; pricing ``expected_returns`` is a ``(date x asset)`` frame with columns ⊆
-  ``view.assets`` and index ⊆ ``view.calendar``.
+- :func:`check_output_shapes` — finite, uniquely labelled target weights with columns ⊆
+  ``view.assets`` and index ⊆ ``view.calendar`` (wide), or a unique ``[date, asset]`` MultiIndex
+  (panel); a forecast is a ``pd.Series`` indexed by ``view.assets``; pricing
+  ``expected_returns`` is a ``(date x asset)`` frame with columns ⊆ ``view.assets`` and index ⊆
+  ``view.calendar``.
 - :func:`check_determinism` — same estimator + same view ⇒ identical output, twice.
 - :func:`check_fit_independence` — an estimator's output on a view is invariant to an earlier fit
   on different data: fit a prefix, fit the full view (the contaminant), refit a freshly rebuilt
@@ -51,7 +52,7 @@ engine-round-trip checks all apply to it exactly as they do to a weights method.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -110,7 +111,7 @@ def _fit(estimator: Any, view: Any) -> Any:
 def _caps(model: Any) -> set[str]:
     caps = model.capabilities()
     assert isinstance(caps, set), f"capabilities() must return a set, got {type(caps).__name__}"
-    return caps
+    return cast("set[str]", caps)
 
 
 def _extractable(caps: set[str]) -> set[str]:
@@ -124,10 +125,10 @@ def _origin_index(view: Any, frac: float = 0.6) -> int:
     return min(n - 2, max(1, round(frac * (n - 1))))
 
 
-def _weights(model: Any, view: Any) -> pd.DataFrame | pd.Series:
+def _weights(model: Any, view: Any) -> pd.DataFrame | pd.Series[Any]:
     w = model.to_weights(view)
     assert isinstance(w, pd.DataFrame | pd.Series), "to_weights must return a DataFrame or Series"
-    return w
+    return cast("pd.DataFrame | pd.Series[Any]", w)
 
 
 def _expected_returns(model: Any, view: Any) -> pd.DataFrame:
@@ -251,18 +252,47 @@ def check_output_shapes(estimator: Any, view_factory: ViewFactory) -> None:
     assets = set(view.assets)
     if capabilities.TO_WEIGHTS in caps:
         w = _weights(model, view)
-        if isinstance(w, pd.DataFrame):
+        if isinstance(view, CrossSectionView):
+            if isinstance(w, pd.DataFrame):
+                assert w.shape[1] == 1, "panel weights must be a Series or one-column DataFrame"
+                panel_weights = w.iloc[:, 0]
+            else:
+                panel_weights = w
+            assert isinstance(panel_weights.index, pd.MultiIndex), "panel weights need a MultiIndex"
+            assert list(panel_weights.index.names) == ["date", "asset"], (
+                "panel weights MultiIndex must be named [date, asset]"
+            )
+            assert panel_weights.index.is_unique, "panel weights need unique (date, asset) keys"
+            assert set(panel_weights.index.get_level_values("date")) <= set(view.calendar), (
+                "panel weight dates must be ⊆ view.calendar"
+            )
+            assert set(map(str, panel_weights.index.get_level_values("asset"))) <= assets, (
+                "panel weight assets must be ⊆ view.assets"
+            )
+            for date, cross in panel_weights.groupby(level="date", sort=False):
+                current = set(view.universe(date))
+                emitted = set(map(str, cross.index.get_level_values("asset")))
+                assert emitted <= current, (
+                    f"panel weights at {date} contain asset(s) outside that date's universe: "
+                    f"{sorted(emitted - current)}"
+                )
+            assert bool(np.isfinite(panel_weights.to_numpy(dtype=np.float64)).all()), (
+                "panel target weights must all be finite"
+            )
+        else:
+            assert isinstance(w, pd.DataFrame), (
+                "time-series weights must be a date x asset DataFrame"
+            )
             assert set(map(str, w.columns)) <= assets, "weights columns must be ⊆ view.assets"
             # Duplicate column labels make the engine's label-based realized-return alignment
             # (``reindex(columns=view.assets)``) ambiguous — reject them up front.
             assert w.columns.is_unique, (
                 "weights columns must be unique labels (duplicates break realized-return alignment)"
             )
+            assert w.index.is_unique, "weights index must be unique"
             assert set(w.index) <= set(view.calendar), "weights index must be ⊆ view.calendar"
-        else:  # panel: long (date, asset) Series
-            assert isinstance(w.index, pd.MultiIndex), "panel weights need a MultiIndex"
-            assert list(w.index.names) == ["date", "asset"], (
-                "panel weights MultiIndex must be named [date, asset]"
+            assert bool(np.isfinite(w.to_numpy(dtype=np.float64)).all()), (
+                "target weights must all be finite"
             )
     if capabilities.TO_FORECAST in caps:
         d = view.calendar[_origin_index(view)]
@@ -398,8 +428,8 @@ def check_no_lookahead(estimator: Any, view_factory: ViewFactory) -> None:
         pa = _expected_returns(model_a, view)
         pb = _expected_returns(model_b, twin)
         _assert_weights_equal_on_common(
-            pa.loc[pa.index <= t],
-            pb.loc[pb.index <= t],
+            cast("pd.DataFrame", pa.loc[pa.index <= t]),
+            cast("pd.DataFrame", pb.loc[pb.index <= t]),
             "expected_returns at dates <= t changed when only post-t data was mutated (look-ahead)",
         )
 

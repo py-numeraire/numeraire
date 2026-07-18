@@ -191,6 +191,7 @@ def test_backtest_dispatches_weights_crosssection_to_panel_output() -> None:
         _panel_view(),
         WalkForwardSplitter(min_train=24, test_size=6),
         method="panel",
+        missing_returns="zero",
     )
     assert isinstance(out, PanelWeightsOutput)
     assert out.capability == capabilities.TO_WEIGHTS
@@ -336,7 +337,11 @@ def test_walk_forward_forecast_alias_warns_and_returns_forecast_output() -> None
 def test_walk_forward_panel_alias_warns_and_returns_panel_output() -> None:
     with pytest.warns(DeprecationWarning, match="backtest_panel"):
         out = walk_forward_panel(
-            _PanelEst(), _panel_view(), WalkForwardSplitter(min_train=24, test_size=6), method="p"
+            _PanelEst(),
+            _panel_view(),
+            WalkForwardSplitter(min_train=24, test_size=6),
+            method="p",
+            missing_returns="zero",
         )
     assert isinstance(out, PanelWeightsOutput)
 

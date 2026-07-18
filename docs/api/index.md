@@ -49,6 +49,7 @@ The most common classes and functions are re-exported at the top level, so
    backtest_pricing
    backtest_pricing_in_sample
    config_hash
+   MissingReturnPolicy
    WeightsOutput
    PanelWeightsOutput
    ForecastOutput

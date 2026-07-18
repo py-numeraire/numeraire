@@ -16,6 +16,7 @@ from numeraire.core.data import (
 )
 from numeraire.core.engine import (
     ForecastOutput,
+    MissingReturnPolicy,
     PanelWeightsOutput,
     PricingOutput,
     WeightsOutput,
@@ -111,6 +112,7 @@ __all__ = [
     "InformationRatioEvaluator",
     "M2Evaluator",
     "MeanReturnEvaluator",
+    "MissingReturnPolicy",
     "Model",
     "OOSR2Evaluator",
     "OutOfSampleR2Evaluator",
