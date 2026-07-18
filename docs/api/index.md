@@ -78,7 +78,10 @@ The most common classes and functions are re-exported at the top level, so
    simulate_weights
    RebalanceSchedule
    SimulationResult
+   assign_portfolio_bins
+   aggregate_assigned_portfolios
    sort_portfolios
+   SortAssignments
    SortResult
    grs_test
    sharpe_diff_test

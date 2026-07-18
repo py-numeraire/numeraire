@@ -10,6 +10,9 @@
    :toctree: generated
    :nosignatures:
 
+   assign_portfolio_bins
+   aggregate_assigned_portfolios
    sort_portfolios
+   SortAssignments
    SortResult
 ```

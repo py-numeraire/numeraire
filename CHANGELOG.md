@@ -10,6 +10,9 @@ Versions are tag-driven (`hatch-vcs`).
 
 ### Added
 
+- `assign_portfolio_bins` and `aggregate_assigned_portfolios` expose portfolio formation and
+  holding-period aggregation as separate, testable steps. `SortAssignments` carries the frozen
+  formation membership and its breakpoints; `sort_portfolios` remains the convenience wrapper.
 - `numeraire.testing.check_fit_independence` — a conformance check that an estimator's output on a
   view is independent of any earlier fit on different data (fit a prefix, fit the full view, refit a
   freshly rebuilt content-equal prefix, require the two prefix outputs to be bit-identical). Catches
@@ -54,6 +57,17 @@ Versions are tag-driven (`hatch-vcs`).
   is the vintage timestamp, so a row-step lag is meaningless; passing `lag != 0` together with
   `vintage_col` now raises `ValueError`. Lagged mode is unchanged: availability is the row's own
   date and `lag` still steps back that many rows in the asset's own series.
+
+### Fixed
+
+- Portfolio sorts no longer let holding-period return availability change formation-period
+  breakpoints or bin membership. Signals, returns, weights, eligibility, and breakpoint-universe
+  masks are validated on unique axes and aligned by pandas labels; missing mask values mean false,
+  infinities are rejected, and thin or signal-degenerate breakpoint universes now fail closed
+  instead of silently falling back to all stocks or emitting collapsed quantiles. Value-weighted
+  bins with no positive observed weight remain `NaN` instead of silently becoming equal-weighted.
+  `SortResult.counts` now explicitly counts frozen formation members, including members whose
+  realized return is missing.
 
 ## [0.2.2] - 2026-07-07
 
