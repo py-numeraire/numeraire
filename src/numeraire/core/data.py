@@ -46,7 +46,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, cast, runtime_checkable
+from typing import Protocol, TypeVar, cast, runtime_checkable
 
 import numpy as np
 import pandas as pd
@@ -123,10 +123,29 @@ def _return_provenance(return_type: str) -> dict[str, str]:
     """Provenance stamp recording an ingestion return-convention conversion (empty when simple).
 
     A ``"log"`` declaration is converted to simple returns once at the door (see the view
-    constructors), so this records ``{"return_input": "log", "converted": "simple"}`` — a
-    hash-visible marker distinguishing a log-declared ingestion from a simple one of the same array.
+    constructors), so this records ``{"return_input": "log", "converted": "simple"}`` — a recorded
+    marker distinguishing a log-declared ingestion from a simple one of the same numeric array.
+    Merged into a backtest ``config``, it becomes part of the run's ``config_hash``.
     """
     return {"return_input": "log", "converted": "simple"} if return_type == "log" else {}
+
+
+_ViewT = TypeVar("_ViewT", "TimeSeriesView", "CrossSectionView")
+
+
+def _adopt_provenance(  # pyright: ignore[reportUnusedFunction] - consumed by numeraire.testing
+    twin: _ViewT, source: TimeSeriesView | CrossSectionView
+) -> _ViewT:
+    """Carry a source view's ingestion provenance onto a rebuilt, data-equal twin (internal).
+
+    The conformance suite reconstructs twin views from a view's *ejected* frames, whose returns are
+    already converted to simple — re-declaring ``return_type="log"`` there would double-convert.
+    Instead the recorded conversion stamp is carried over unchanged, so an estimator that reads the
+    public ``provenance`` property sees identical values on a view and its twin.
+    """
+    # same-module internal hook; the attribute is this module's own view state
+    twin._provenance = dict(source.provenance)  # pyright: ignore[reportPrivateUsage]
+    return twin
 
 
 def _log_to_simple(returns: pd.DataFrame) -> pd.DataFrame:
@@ -401,8 +420,9 @@ class TimeSeriesView:
         self._ret: Float = _as_2d(returns)
         self._blocks: list[Block] = list(blocks)
         self.horizon: int = horizon
-        # Records an ingestion return-convention conversion (log -> simple), hash-visible via
-        # `config_hash`; empty for a simple-declared input. Carried across PIT sub-views.
+        # Records an ingestion return-convention conversion (log -> simple); empty for a
+        # simple-declared input. Carried across PIT sub-views; merge into a backtest `config`
+        # to make it part of the run's `config_hash`.
         self._provenance: dict[str, str] = _return_provenance(return_type)
         # Calendar = the subset of dates at which predictions/rebalances happen. Defaults to
         # the full returns index; `window`/`between` carve out train/test sub-calendars.
