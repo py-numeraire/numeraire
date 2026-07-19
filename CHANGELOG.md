@@ -26,8 +26,22 @@ Versions are tag-driven (`hatch-vcs`).
 - Property-based no-look-ahead tests for the timestamp-`asof` availability layer (`VintagedBlock`
   and `CharBlock` vintaged mode), checked against an independent brute-force oracle over irregular
   calendars, long publication lags and intra-period stamps.
+- Optional `n_obs` / `n_dropped` attrition columns (`schema.ATTRITION_COLUMNS`) on the tidy result
+  rows of the benchmark-comparison evaluators (`OutOfSampleR2Evaluator`, `SquaredErrorDiffEvaluator`,
+  `ClarkWestEvaluator`, `CrossSectionalR2Evaluator`, `AverageAbsAlphaEvaluator`). They record the
+  size of the joint finite sample a metric was scored on and how many candidate observations the
+  joint mask excluded, so selective missingness is auditable on the row itself. The columns are
+  schema-additive: `validate_result` never requires them, but rejects negative or infinite counts
+  when present.
 
 ### Changed
+
+- **Breaking — benchmark-comparison evaluators fail closed above 50% missingness.** When the joint
+  finite mask (model ∩ target ∩ benchmark) drops more than half of the candidate observations,
+  `OutOfSampleR2Evaluator`, `SquaredErrorDiffEvaluator`, `ClarkWestEvaluator`, and the cross-sectional
+  pricing evaluators now raise `ValueError` instead of scoring a rump sample. There is no warning
+  tier — a majority-missing comparison is refused outright. Below the threshold, scoring proceeds and
+  the `n_obs` / `n_dropped` columns make the drop visible.
 
 - **Breaking — weight backtests now fail closed on a missing held return.** `backtest_weights` and
   `backtest_panel` default to `missing_returns="error"`; callers must explicitly choose `"zero"` or
@@ -73,6 +87,20 @@ Versions are tag-driven (`hatch-vcs`).
 
 ### Fixed
 
+- Benchmark-comparison evaluators no longer let non-finite predictions manufacture apparent skill.
+  `OutOfSampleR2Evaluator`, `SquaredErrorDiffEvaluator`, and `ClarkWestEvaluator` previously scored
+  the model and its benchmark with separate `nansum` denominators, and the pricing evaluators
+  averaged predicted and realized returns over separate `nanmean` samples. A forecast that was
+  present on some observations and missing on others could therefore be scored against a smaller
+  error base than the fully-observed benchmark — a selectively-missing model reporting false skill
+  (e.g. roughly +50% out-of-sample R² against a zero benchmark). Every such metric now builds one
+  joint finite mask across model, target, and benchmark and scores all terms on the same
+  observations; a per-origin statistic drops (rather than zero-fills) origins with no jointly-finite
+  cell.
+- `ReferenceResult` now rejects a non-finite `expected` value and a non-finite or negative
+  `tolerance` at construction. A `NaN`/`Inf` expected value or an infinite band would previously
+  auto-pass its own `check`, letting a vacuous "verified" reproduction be registered; the existing
+  exact-match guard (a zero band on an integer target stays legal) is unchanged.
 - Portfolio sorts no longer let holding-period return availability change formation-period
   breakpoints or bin membership. Signals, returns, weights, eligibility, and breakpoint-universe
   masks are validated on unique axes and aligned by pandas labels; missing mask values mean false,

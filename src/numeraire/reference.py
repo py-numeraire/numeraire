@@ -111,6 +111,22 @@ class ReferenceResult:
         stray = set(self.tolerance) - set(self.expected)
         if stray:
             raise ValueError(f"{self.name}: tolerance names non-expected metrics {sorted(stray)}")
+        # A non-finite expected value (NaN/Inf) would auto-pass its own band check — an all-NaN
+        # false green pinned at construction. A non-finite or negative tolerance is likewise
+        # vacuous (an infinite band accepts anything; a negative band can never be satisfied).
+        # Reject both here.
+        nonfinite_expected = sorted(
+            m for m, target in self.expected.items() if not math.isfinite(float(target))
+        )
+        if nonfinite_expected:
+            raise ValueError(f"{self.name}: expected value(s) {nonfinite_expected} must be finite")
+        bad_tol = sorted(
+            m
+            for m, band in self.tolerance.items()
+            if not math.isfinite(float(band)) or float(band) < 0.0
+        )
+        if bad_tol:
+            raise ValueError(f"{self.name}: tolerance(s) {bad_tol} must be finite and non-negative")
         # A zero band demands bit-exact equality, which is only meaningful for an integer target
         # (a count, N, …); a float scalar with no tolerance can never match across data vintages and
         # is almost always a forgotten band — reject it at construction.

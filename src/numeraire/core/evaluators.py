@@ -42,14 +42,28 @@ class _HasProvenance(Protocol):
     def universe(self) -> str: ...
 
 
-def _row(out: _HasProvenance, metric: str, value: float, date: object) -> dict[str, object]:
+def _row(
+    out: _HasProvenance,
+    metric: str,
+    value: float,
+    date: object,
+    *,
+    n_obs: int | None = None,
+    n_dropped: int | None = None,
+) -> dict[str, object]:
     """Build one result-schema row from an OOS output's provenance plus a (metric, value).
 
     ``protocol`` is read from the output when present (a :class:`PricingOutput` carries its
     ``"walk_forward"`` / ``"in_sample"`` label) and defaults to ``"walk_forward"`` otherwise — every
     weights/forecast output is produced by a walk-forward driver, so that is its intrinsic protocol.
+
+    ``n_obs`` / ``n_dropped`` are the optional attrition counts (:data:`ATTRITION_COLUMNS`): the
+    size of the joint finite sample the metric was computed on and the count of candidate
+    observations the joint mask excluded. Evaluators that compare a model against a benchmark or
+    realized target attach them so a selectively-missing input can never quietly change the
+    denominator; the rest omit them.
     """
-    return {
+    row: dict[str, object] = {
         "run_id": out.run_id,
         "method": out.method,
         "date": date,
@@ -61,11 +75,64 @@ def _row(out: _HasProvenance, metric: str, value: float, date: object) -> dict[s
         "config_hash": out.config_hash,
         "data_vintage": out.data_vintage,
     }
+    if n_obs is not None:
+        row["n_obs"] = n_obs
+    if n_dropped is not None:
+        row["n_dropped"] = n_dropped
+    return row
 
 
 def _frame(rows: list[dict[str, object]]) -> pd.DataFrame:
-    """Assemble result rows into a DataFrame with the canonical column order."""
-    return pd.DataFrame(rows, columns=list(RESULT_COLUMNS))
+    """Assemble result rows into a DataFrame with the canonical columns first, extras appended.
+
+    Any keys beyond :data:`RESULT_COLUMNS` (e.g. the optional attrition columns) are kept, in first
+    appearance order, after the canonical columns — the result schema is additive, so a downstream
+    consumer sees the standard columns unchanged and the extras alongside.
+    """
+    extra: list[str] = []
+    for r in rows:
+        for key in r:
+            if key not in RESULT_COLUMNS and key not in extra:
+                extra.append(key)
+    return pd.DataFrame(rows, columns=list(RESULT_COLUMNS) + extra)
+
+
+# Fail-closed missingness threshold: a comparison whose joint finite mask drops more than this
+# fraction of its candidate observations is refused (raises), rather than scored on a rump sample or
+# flagged with a warning that a batch run would swallow. Below the threshold the attrition counts on
+# each row keep the drop auditable.
+_MAX_DROP_FRACTION: float = 0.5
+
+
+def _joint_finite_mask(*arrays: np.ndarray) -> np.ndarray:
+    """Element-wise ``finite(a0) & finite(a1) & ...`` over identically-shaped arrays.
+
+    One mask for the whole comparison, so the model, its target, and the benchmark are always scored
+    on the *same* observations — never on separate ``nansum`` / ``nanmean`` denominators (which lets
+    a selectively-missing model manufacture apparent skill against a fully-observed benchmark).
+    """
+    mask = np.isfinite(arrays[0])
+    for a in arrays[1:]:
+        mask = mask & np.isfinite(a)
+    return mask
+
+
+def _attrition(mask: np.ndarray, evaluator: str) -> tuple[int, int]:
+    """Return ``(n_obs, n_dropped)`` for ``mask``; raise if it drops a majority of candidates.
+
+    ``n_obs`` is the joint finite sample size, ``n_dropped`` the number of candidate observations
+    the joint mask excluded. Dropping more than :data:`_MAX_DROP_FRACTION` of the candidates raises
+    ``ValueError`` (fail closed — a majority-missing comparison is not scored).
+    """
+    total = int(mask.size)
+    n_obs = int(np.count_nonzero(mask))
+    n_dropped = total - n_obs
+    if total > 0 and n_dropped > _MAX_DROP_FRACTION * total:
+        raise ValueError(
+            f"{evaluator}: joint finite sample drops {n_dropped}/{total} candidate observations "
+            f"(> {_MAX_DROP_FRACTION:.0%}); refusing to score a majority-missing comparison"
+        )
+    return n_obs, n_dropped
 
 
 def _dated_weights(
@@ -166,11 +233,17 @@ class OutOfSampleR2Evaluator:
             b = np.zeros_like(r)
         else:
             b = oos_output.benchmark.to_numpy(dtype=np.float64)
-        sse_model = float(np.nansum((r - f) ** 2))
-        sse_bench = float(np.nansum((r - b) ** 2))
+        # One joint finite sample for model, target, and benchmark: both SSEs share the same
+        # observations, so a forecast that is missing where the benchmark is present can no longer
+        # shrink only its own denominator and manufacture skill.
+        mask = _joint_finite_mask(r, f, b)
+        n_obs, n_dropped = _attrition(mask, "OutOfSampleR2Evaluator")
+        rm, fm, bm = r[mask], f[mask], b[mask]
+        sse_model = float(np.sum((rm - fm) ** 2))
+        sse_bench = float(np.sum((rm - bm) ** 2))
         r2 = float("nan") if sse_bench == 0.0 else (1.0 - sse_model / sse_bench) * 100.0
         date = oos_output.forecasts.index[-1]
-        return _frame([_row(oos_output, "oos_r2_pct", r2, date)])
+        return _frame([_row(oos_output, "oos_r2_pct", r2, date, n_obs=n_obs, n_dropped=n_dropped)])
 
 
 class OOSR2Evaluator(OutOfSampleR2Evaluator):
@@ -275,9 +348,21 @@ class SquaredErrorDiffEvaluator:
         r = oos_output.realized.to_numpy(dtype=np.float64)
         f = oos_output.forecasts.to_numpy(dtype=np.float64)
         b = oos_output.benchmark.to_numpy(dtype=np.float64)
-        sed = np.nansum((r - b) ** 2 - (r - f) ** 2, axis=1)
+        # One joint finite mask over the (origin x asset) cells: each cell enters both squared-error
+        # terms or neither, and the overall drop is bounded. A row with no joint-finite cell scores
+        # ``nan`` (n_obs=0) rather than a spurious 0 that would flatten the CDSPE curve.
+        mask = _joint_finite_mask(r, f, b)
+        _attrition(mask, "SquaredErrorDiffEvaluator")
+        diff = (r - b) ** 2 - (r - f) ** 2
         idx = oos_output.forecasts.index
-        rows = [_row(oos_output, "sed", float(v), t) for t, v in zip(idx, sed, strict=True)]
+        rows: list[dict[str, object]] = []
+        for i, t in enumerate(idx):
+            row_mask = mask[i]
+            k = int(np.count_nonzero(row_mask))
+            value = float(diff[i][row_mask].sum()) if k else float("nan")
+            rows.append(
+                _row(oos_output, "sed", value, t, n_obs=k, n_dropped=int(row_mask.size - k))
+            )
         return _frame(rows)
 
 
@@ -302,13 +387,28 @@ class ClarkWestEvaluator:
         r = oos_output.realized.to_numpy(dtype=np.float64)
         f = oos_output.forecasts.to_numpy(dtype=np.float64)
         b = oos_output.benchmark.to_numpy(dtype=np.float64)
-        adj = np.nansum((r - b) ** 2 - ((r - f) ** 2 - (b - f) ** 2), axis=1)
-        n = len(adj)
+        # One joint finite mask over the (origin x asset) cells, bounded attrition. The per-origin
+        # adjusted loss difference is summed over its joint-finite cells only, and an origin with no
+        # joint-finite cell is *dropped* from the time series (not carried as a phantom 0 that would
+        # bias the mean and inflate the effective sample of the Newey-West statistic).
+        mask = _joint_finite_mask(r, f, b)
+        n_obs, n_dropped = _attrition(mask, "ClarkWestEvaluator")
+        per_cell = (r - b) ** 2 - ((r - f) ** 2 - (b - f) ** 2)
+        adj = np.array(
+            [per_cell[i][mask[i]].sum() for i in range(r.shape[0]) if mask[i].any()],
+            dtype=np.float64,
+        )
+        n = adj.size
         se = float(np.sqrt(newey_west_lrv(adj, self.nw_lags) / n)) if n else float("nan")
         t_stat = float(adj.mean() / se) if n and se > 0 else float("nan")
         p = float(norm.sf(t_stat)) if np.isfinite(t_stat) else float("nan")
         date = oos_output.forecasts.index[-1]
-        return _frame([_row(oos_output, "cw_t", t_stat, date), _row(oos_output, "cw_p", p, date)])
+        return _frame(
+            [
+                _row(oos_output, "cw_t", t_stat, date, n_obs=n_obs, n_dropped=n_dropped),
+                _row(oos_output, "cw_p", p, date, n_obs=n_obs, n_dropped=n_dropped),
+            ]
+        )
 
 
 class ICEvaluator:
@@ -557,14 +657,29 @@ class SortinoEvaluator:
         return _frame([_row(oos_output, "sortino", sortino, s.index[-1])])
 
 
-def _pricing_means(out: PricingOutput) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Per-asset time-mean predicted and realized returns + a finite mask (assets with both)."""
+def _pricing_means(
+    out: PricingOutput,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
+    """Per-asset joint time-mean predicted and realized returns + finite mask + attrition counts.
+
+    Each asset's predicted and realized means are taken over the *same* origins — those where both
+    are finite — so a period present in one series but missing in the other can never pull the two
+    means off a different sample. Assets with no jointly-observed origin drop out (``finite`` is
+    ``False``). ``n_obs`` / ``n_dropped`` count the jointly-finite vs. excluded ``(origin x asset)``
+    candidate cells across the panel; a majority-missing panel raises (see :func:`_attrition`).
+    """
+    p = out.predicted.to_numpy(dtype=np.float64)
+    r = out.realized.to_numpy(dtype=np.float64)
+    mask = _joint_finite_mask(p, r)
+    n_obs, n_dropped = _attrition(mask, "pricing evaluator")
+    pj = np.where(mask, p, np.nan)
+    rj = np.where(mask, r, np.nan)
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN asset columns -> NaN mean
-        mp = np.nanmean(out.predicted.to_numpy(dtype=np.float64), axis=0)
-        mr = np.nanmean(out.realized.to_numpy(dtype=np.float64), axis=0)
+        warnings.simplefilter("ignore", RuntimeWarning)  # assets with no joint cell -> NaN mean
+        mp = np.nanmean(pj, axis=0)
+        mr = np.nanmean(rj, axis=0)
     finite = np.isfinite(mp) & np.isfinite(mr)
-    return mp, mr, finite
+    return mp, mr, finite, n_obs, n_dropped
 
 
 def _pricing_date(out: PricingOutput) -> object:
@@ -587,7 +702,7 @@ class CrossSectionalR2Evaluator:
     def evaluate(self, oos_output: object) -> pd.DataFrame:
         if not isinstance(oos_output, PricingOutput):
             raise TypeError("CrossSectionalR2Evaluator requires a PricingOutput")
-        mp, mr, finite = _pricing_means(oos_output)
+        mp, mr, finite, n_obs, n_dropped = _pricing_means(oos_output)
         mp, mr = mp[finite], mr[finite]
         if mp.size < 2:
             r2 = float("nan")
@@ -598,7 +713,18 @@ class CrossSectionalR2Evaluator:
             ss_res = float(resid @ resid)
             ss_tot = float(((mr - mr.mean()) ** 2).sum())
             r2 = float("nan") if ss_tot == 0.0 else 1.0 - ss_res / ss_tot
-        return _frame([_row(oos_output, "xs_r2", r2, _pricing_date(oos_output))])
+        return _frame(
+            [
+                _row(
+                    oos_output,
+                    "xs_r2",
+                    r2,
+                    _pricing_date(oos_output),
+                    n_obs=n_obs,
+                    n_dropped=n_dropped,
+                )
+            ]
+        )
 
 
 class AverageAbsAlphaEvaluator:
@@ -616,10 +742,21 @@ class AverageAbsAlphaEvaluator:
     def evaluate(self, oos_output: object) -> pd.DataFrame:
         if not isinstance(oos_output, PricingOutput):
             raise TypeError("AverageAbsAlphaEvaluator requires a PricingOutput")
-        mp, mr, finite = _pricing_means(oos_output)
+        mp, mr, finite, n_obs, n_dropped = _pricing_means(oos_output)
         alpha = (mr - mp)[finite]
         value = float(np.mean(np.abs(alpha))) if alpha.size else float("nan")
-        return _frame([_row(oos_output, "avg_abs_alpha", value, _pricing_date(oos_output))])
+        return _frame(
+            [
+                _row(
+                    oos_output,
+                    "avg_abs_alpha",
+                    value,
+                    _pricing_date(oos_output),
+                    n_obs=n_obs,
+                    n_dropped=n_dropped,
+                )
+            ]
+        )
 
 
 # Bundled native evaluators register on import (open registry).

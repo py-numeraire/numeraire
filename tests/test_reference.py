@@ -145,6 +145,17 @@ def test_zero_band_demands_exact_match() -> None:
         ({"tolerance": {"nope": 0.1}}, "non-expected metrics"),
         ({"name": ""}, "must be non-empty"),
         ({"expected": {"r2": 3.51}}, "zero tolerance band but a non-integer"),
+        ({"expected": {"m": float("nan")}}, "must be finite"),
+        ({"expected": {"m": float("inf")}}, "must be finite"),
+        ({"expected": {"m": 1.0}, "tolerance": {"m": -0.1}}, "must be finite and non-negative"),
+        (
+            {"expected": {"m": 1.0}, "tolerance": {"m": float("inf")}},
+            "must be finite and non-negative",
+        ),
+        (
+            {"expected": {"m": 1.0}, "tolerance": {"m": float("nan")}},
+            "must be finite and non-negative",
+        ),
     ],
 )
 def test_post_init_validation(kwargs: dict[str, object], match: str) -> None:
@@ -204,8 +215,14 @@ def test_reference_params_marks_unavailable_as_skip() -> None:
     assert any(m.name == "skip" for m in wrds_marks)  # credentialed: self-skips
 
 
-@pytest.mark.parametrize("case", reference_params(tier=PUBLIC))
-def test_public_references_end_to_end(case: ReferenceResult) -> None:
-    # A public case drives a real check() here; credentialed / restricted cases would self-skip.
-    # Feed each expected value back exactly to exercise the band on registered cases.
-    case.check(dict(case.expected))
+def test_public_reference_end_to_end_within_band() -> None:
+    # A public case drives a real check() with *independent* computed values (distinct from the
+    # pinned expected, each within its band) — not the expected fed back to itself, which would make
+    # the assertion vacuous regardless of the band.
+    FF2015.check({"grs": 2.90, "avg_abs_alpha": 0.088})
+
+
+def test_public_reference_deliberate_failure() -> None:
+    # The band must actually bite: computed values well outside every tolerance must fail.
+    with pytest.raises(AssertionError):
+        FF2015.check({"grs": 3.50, "avg_abs_alpha": 0.20})
