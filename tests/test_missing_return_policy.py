@@ -531,6 +531,7 @@ def test_policy_is_hashed_and_recorded_in_metadata() -> None:
         "missing_held": 1,
         "missing_dates": 1,
         "renormalized_dates": 0,
+        "frequency": "ME",  # target-contract metadata now travels alongside the scoring stats
     }
     assert renormalized.meta["renormalized_dates"] == 1
 

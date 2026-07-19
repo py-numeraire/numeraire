@@ -30,7 +30,12 @@ import numpy as np
 import pandas as pd
 
 from numeraire.core import capabilities
-from numeraire.core.data import CrossSectionView, Float, TimeSeriesView
+from numeraire.core.data import (
+    CrossSectionView,
+    Float,
+    TimeSeriesView,
+    _validate_horizon,  # pyright: ignore[reportPrivateUsage]  # shared horizon guard, in-package
+)
 from numeraire.core.protocols import (
     Estimator,
     SupportsForecast,
@@ -364,6 +369,41 @@ def config_hash(config: dict[str, Any] | None) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 
+def _infer_frequency(calendar: pd.Index) -> str | None:
+    """The pandas frequency code of a decision calendar, or ``None`` when not inferable.
+
+    A wrapper over :func:`pandas.infer_freq` that never guesses: an irregular calendar (mixed gaps,
+    fewer than three observations) yields ``None`` rather than a fabricated code. Drivers stamp the
+    result into an output's ``meta['frequency']`` so an annualizing evaluator can derive the
+    periods-per-year scaling from the data instead of a hard-coded default (and refuse when it is
+    ``None``). The comparison is on the calendar the decisions are made on, not the (possibly finer)
+    return frequency.
+    """
+    if not isinstance(calendar, pd.DatetimeIndex) or len(calendar) < 3:
+        return None
+    try:
+        return pd.infer_freq(calendar)
+    except (ValueError, TypeError):
+        return None
+
+
+def _target_contract_meta(
+    calendar: pd.Index, horizon: int, base: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Merge the effective target contract (frequency + overlap) into an output's ``meta``.
+
+    Always stamps ``frequency`` (the inferred decision-calendar code, or ``None``). When
+    ``horizon > 1`` the forward targets overlap by ``horizon - 1`` steps (a step-1 walk-forward over
+    an ``h``-period return reuses ``h - 1`` future periods across adjacent origins), so ``overlap``
+    is stamped as well — an annualizing/HAC-aware evaluator must treat such a series explicitly.
+    """
+    meta = dict(base or {})
+    meta["frequency"] = _infer_frequency(calendar)
+    if horizon > 1:
+        meta["overlap"] = horizon - 1
+    return meta
+
+
 def _fit_isolated(estimator: Estimator, view: Any, method: str) -> Any:
     """Deep-copy ``estimator``, fit the private copy, and return the fitted model.
 
@@ -474,10 +514,18 @@ class WeightsOutput:
     capability: str = capabilities.TO_WEIGHTS
     meta: dict[str, Any] = field(default_factory=dict)
     missing_returns: MissingReturnPolicy = "error"
+    horizon: int = 1
+    """Effective forecast horizon ``h`` of the paired targets (steps of the decision calendar).
+
+    Populated by the drivers from the producing view; ``1`` is the default a direct construction
+    keeps. ``realized.loc[t]`` is the return over ``(t, t+h]``, so an annualizing evaluator that
+    reads it can tell a single-period target from an overlapping multi-period one.
+    """
 
     def __post_init__(self) -> None:
         """Reject malformed target-weight artifacts before any evaluator can consume them."""
         _validate_missing_return_policy(self.missing_returns)
+        _validate_horizon(self.horizon)
         if not self.weights.index.equals(self.realized.index) or not self.weights.columns.equals(
             self.realized.columns
         ):
@@ -534,6 +582,16 @@ class ForecastOutput:
     run_id: str
     capability: str = capabilities.TO_FORECAST
     meta: dict[str, Any] = field(default_factory=dict)
+    horizon: int = 1
+    """Effective forecast horizon ``h`` (steps of the decision calendar); drivers set it explicitly.
+
+    ``forecasts.loc[t]`` predicts and ``realized.loc[t]`` records the return over ``(t, t+h]``; the
+    benchmark carried alongside is the historical mean compounded to the same ``h``-period target.
+    """
+
+    def __post_init__(self) -> None:
+        """Reject a non-positive effective horizon before any evaluator consumes the output."""
+        _validate_horizon(self.horizon)
 
     @property
     def universe(self) -> str:
@@ -564,6 +622,16 @@ class PricingOutput:
     protocol: str
     capability: str = capabilities.TO_PRICING
     meta: dict[str, Any] = field(default_factory=dict)
+    horizon: int = 1
+    """Effective forecast horizon ``h`` (steps of the decision calendar); drivers set it explicitly.
+
+    ``predicted.loc[t]`` prices the return realized over ``(t, t+h]``. Resolves the retrospective
+    gap where a pricing output carried no horizon field of its own.
+    """
+
+    def __post_init__(self) -> None:
+        """Reject a non-positive effective horizon before any evaluator consumes the output."""
+        _validate_horizon(self.horizon)
 
     @property
     def universe(self) -> str:
@@ -608,8 +676,17 @@ def backtest_forecast(
     fit-relevant mutable state around the copy (class attributes, module globals, containers a
     custom ``__deepcopy__`` aliases); an un-copyable resource belongs behind a factory built at
     ``fit`` time.
+
+    ``horizon`` exists only to let a caller *assert* the view's horizon; passing a value that
+    disagrees with ``view.horizon`` raises (the view is the single source of truth for the horizon).
+    Leave it ``None`` (the default) to use ``view.horizon``.
     """
-    h = view.horizon if horizon is None else horizon
+    if horizon is not None and horizon != view.horizon:
+        raise ValueError(
+            f"{method}: horizon={horizon} disagrees with view.horizon={view.horizon}; the view is "
+            "the single source of truth for the horizon — set it on the view, or leave horizon=None"
+        )
+    h = view.horizon
     chash = config_hash(config)
     rid = run_id if run_id is not None else f"{method}-{chash}"
     assets = view.assets
@@ -657,7 +734,12 @@ def backtest_forecast(
             if extra:
                 raise ValueError(f"{method}: forecast carries assets absent from the view: {extra}")
             f = fc.set_axis(normalized).reindex(assets)
-            bench = train.returns_frame().to_numpy(dtype=np.float64).mean(axis=0)
+            # The historical-mean benchmark must target the SAME h-period return the model predicts.
+            # A step-1 mean of single-period returns understates an h>1 compounded target; under iid
+            # returns the h-period benchmark forecast is ``(1 + mu)^h - 1``. For h=1 this is exactly
+            # ``mu``, so single-period runs are unchanged.
+            mu = train.returns_frame().to_numpy(dtype=np.float64).mean(axis=0)
+            bench = np.power(1.0 + mu, h) - 1.0
             rows.append(
                 (origin, f.to_numpy(dtype=np.float64), bench, view.target_asof(origin, horizon=h))
             )
@@ -683,6 +765,8 @@ def backtest_forecast(
         config_hash=chash,
         data_vintage=data_vintage,
         run_id=rid,
+        horizon=h,
+        meta=_target_contract_meta(cal, h),
     )
 
 
@@ -823,7 +907,8 @@ def backtest_weights(
         data_vintage=data_vintage,
         run_id=rid,
         missing_returns=policy,
-        meta=_scoring_meta(policy, stats),
+        horizon=view.horizon,
+        meta=_target_contract_meta(view.calendar, view.horizon, _scoring_meta(policy, stats)),
     )
 
 
@@ -847,10 +932,18 @@ class PanelWeightsOutput:
     capability: str = capabilities.TO_WEIGHTS
     meta: dict[str, Any] = field(default_factory=dict)
     missing_returns: MissingReturnPolicy = "error"
+    horizon: int = 1
+    """Effective forecast horizon ``h`` of the paired targets (steps of the decision calendar).
+
+    Populated by :func:`backtest_panel` from the producing view; ``realized`` is each name's
+    ``(t, t+h]`` return, so an annualizing evaluator can distinguish overlapping multi-period
+    targets.
+    """
 
     def __post_init__(self) -> None:
         """Reject malformed target-weight artifacts before any evaluator can consume them."""
         _validate_missing_return_policy(self.missing_returns)
+        _validate_horizon(self.horizon)
         if not self.weights.index.equals(self.realized.index):
             raise ValueError("panel weights and realized must have identical indexes")
         index = self.weights.index
@@ -1017,7 +1110,8 @@ def backtest_panel(
         data_vintage=data_vintage,
         run_id=rid,
         missing_returns=policy,
-        meta=_scoring_meta(policy, stats),
+        horizon=view.horizon,
+        meta=_target_contract_meta(view.calendar, view.horizon, _scoring_meta(policy, stats)),
     )
 
 
@@ -1175,6 +1269,8 @@ def backtest_pricing(
         data_vintage=data_vintage,
         run_id=rid,
         protocol="walk_forward",
+        horizon=view.horizon,
+        meta=_target_contract_meta(view.calendar, view.horizon),
     )
 
 
@@ -1217,6 +1313,8 @@ def backtest_pricing_in_sample(
         data_vintage=data_vintage,
         run_id=rid,
         protocol="in_sample",
+        horizon=view.horizon,
+        meta=_target_contract_meta(view.calendar, view.horizon),
     )
 
 

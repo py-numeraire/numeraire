@@ -8,6 +8,7 @@ open evaluator registry so external packages add peers without editing core.
 
 from __future__ import annotations
 
+import re
 import warnings
 from typing import ClassVar, Protocol
 
@@ -146,6 +147,98 @@ def _attrition(
     return n_obs, n_dropped
 
 
+# Standard pandas frequency codes → periods per year, for deriving an annualization factor from an
+# output's inferred decision-calendar frequency. Anchor suffixes (``W-SUN``, ``QE-DEC``) are
+# dropped before lookup; pandas 2.2 renamed the period-end codes (``M``→``ME``, ``Q``→``QE``,
+# ``Y``/``A``→``YE``), so both spellings map. A frequency the map does not cover, an irregular
+# calendar, or a non-unit multiple (``2D``) is *not* guessed — an explicit ``periods_per_year`` is
+# then required.
+_FREQ_PERIODS_PER_YEAR: dict[str, int] = {
+    "B": 252,
+    "C": 252,
+    "D": 252,
+    "W": 52,
+    "M": 12,
+    "ME": 12,
+    "MS": 12,
+    "BM": 12,
+    "BME": 12,
+    "BMS": 12,
+    "Q": 4,
+    "QE": 4,
+    "QS": 4,
+    "BQ": 4,
+    "BQE": 4,
+    "A": 1,
+    "Y": 1,
+    "YE": 1,
+    "YS": 1,
+    "AS": 1,
+    "BA": 1,
+    "BY": 1,
+    "BYE": 1,
+}
+
+_FREQ_CODE_RE = re.compile(r"^(\d*)([A-Za-z]+)$")
+
+
+def _periods_per_year_from_frequency(freq: str) -> int | None:
+    """Map a pandas frequency code to periods per year, or ``None`` when it is not standard.
+
+    Drops an anchor suffix (``W-SUN`` → ``W``) and refuses a non-unit multiple (``2D`` would
+    rescale the calendar), so only a plain standard code resolves; anything else returns ``None``
+    (the caller then requires an explicit ``periods_per_year``).
+    """
+    core = freq.split("-", 1)[0]
+    m = _FREQ_CODE_RE.match(core)
+    if m is None:
+        return None
+    multiplier = int(m.group(1)) if m.group(1) else 1
+    if multiplier != 1:
+        return None
+    return _FREQ_PERIODS_PER_YEAR.get(m.group(2).upper())
+
+
+def _resolve_periods_per_year(
+    out: WeightsOutput | PanelWeightsOutput | ForecastOutput | PricingOutput,
+    periods_per_year: int | None,
+    evaluator: str,
+) -> int:
+    """Resolve the annualization factor: an explicit argument always wins, else derive from meta.
+
+    When ``periods_per_year`` is given it is used verbatim. Otherwise it is derived from the
+    output's ``meta['frequency']`` (stamped by the drivers from the decision calendar). Derivation
+    is *refused* — raising ``ValueError`` — when the targets overlap (``meta['overlap'] > 0``, a
+    multi-period horizon whose adjacent targets share future periods; annualizing an overlapping
+    series needs explicit treatment) or when no standard frequency is inferable (irregular calendar
+    / unknown code). This is the contract that stops daily, monthly, and overlapping outputs being
+    annualized with one silent default.
+    """
+    if periods_per_year is not None:
+        return periods_per_year
+    meta = out.meta
+    overlap = meta.get("overlap")
+    if overlap:
+        raise ValueError(
+            f"{evaluator}: the output has overlapping targets (overlap={overlap}); annualizing "
+            "overlapping (multi-period-horizon) returns needs explicit treatment — pass "
+            "periods_per_year explicitly"
+        )
+    freq = meta.get("frequency")
+    if freq is None:
+        raise ValueError(
+            f"{evaluator}: cannot derive periods_per_year — the output carries no inferable "
+            "decision-calendar frequency (irregular calendar); pass periods_per_year explicitly"
+        )
+    ppy = _periods_per_year_from_frequency(str(freq))
+    if ppy is None:
+        raise ValueError(
+            f"{evaluator}: cannot derive periods_per_year from decision-calendar frequency "
+            f"{freq!r}; pass periods_per_year explicitly"
+        )
+    return ppy
+
+
 def _dated_weights(
     out: WeightsOutput | PanelWeightsOutput,
 ) -> list[tuple[object, dict[str, float]]]:
@@ -174,20 +267,27 @@ def _dated_weights(
 
 
 class SharpeEvaluator:
-    """Annualized Sharpe ratio of the realized strategy returns (the timing headline)."""
+    """Annualized Sharpe ratio of the realized strategy returns (the timing headline).
+
+    ``periods_per_year`` scales the per-period ratio by ``sqrt(periods_per_year)``. Leave it
+    ``None`` (the default) to derive it from the output's decision-calendar frequency; pass an
+    explicit value for an irregular or overlapping (multi-period-horizon) output, where the
+    framework refuses to guess (see :func:`_resolve_periods_per_year`).
+    """
 
     requires: ClassVar[set[str]] = {capabilities.TO_WEIGHTS}
 
-    def __init__(self, periods_per_year: int = 12) -> None:
+    def __init__(self, periods_per_year: int | None = None) -> None:
         self.periods_per_year = periods_per_year
 
     def evaluate(self, oos_output: object) -> pd.DataFrame:
         if not isinstance(oos_output, WeightsOutput | PanelWeightsOutput):
             raise TypeError("SharpeEvaluator requires a WeightsOutput or PanelWeightsOutput")
+        ppy = _resolve_periods_per_year(oos_output, self.periods_per_year, "SharpeEvaluator")
         s = oos_output.strategy_returns()
         r = s.to_numpy(dtype=np.float64)
         r = r[~np.isnan(r)]
-        ann = float(np.sqrt(self.periods_per_year))
+        ann = float(np.sqrt(ppy))
         if r.size < 2 or float(np.std(r, ddof=1)) == 0.0:
             sharpe = float("nan")
         else:
@@ -196,20 +296,26 @@ class SharpeEvaluator:
 
 
 class MeanReturnEvaluator:
-    """Annualized mean of the realized strategy returns."""
+    """Annualized mean of the realized strategy returns.
+
+    ``periods_per_year`` scales the per-period mean; ``None`` (default) derives it from the output's
+    decision-calendar frequency and refuses on an irregular/overlapping output (see
+    :func:`_resolve_periods_per_year`).
+    """
 
     requires: ClassVar[set[str]] = {capabilities.TO_WEIGHTS}
 
-    def __init__(self, periods_per_year: int = 12) -> None:
+    def __init__(self, periods_per_year: int | None = None) -> None:
         self.periods_per_year = periods_per_year
 
     def evaluate(self, oos_output: object) -> pd.DataFrame:
         if not isinstance(oos_output, WeightsOutput | PanelWeightsOutput):
             raise TypeError("MeanReturnEvaluator requires a WeightsOutput or PanelWeightsOutput")
+        ppy = _resolve_periods_per_year(oos_output, self.periods_per_year, "MeanReturnEvaluator")
         s = oos_output.strategy_returns()
         r = s.to_numpy(dtype=np.float64)
         r = r[~np.isnan(r)]
-        mean = float(np.mean(r)) * self.periods_per_year if r.size else float("nan")
+        mean = float(np.mean(r)) * ppy if r.size else float("nan")
         return _frame([_row(oos_output, "mean_return", mean, s.index[-1])])
 
 
@@ -490,7 +596,7 @@ class AlphaEvaluator:
     requires: ClassVar[set[str]] = {capabilities.TO_WEIGHTS}
 
     def __init__(
-        self, factors: pd.DataFrame, *, nw_lags: int = 0, periods_per_year: int = 12
+        self, factors: pd.DataFrame, *, nw_lags: int = 0, periods_per_year: int | None = None
     ) -> None:
         self.factors = factors
         self.nw_lags = nw_lags
@@ -499,12 +605,13 @@ class AlphaEvaluator:
     def evaluate(self, oos_output: object) -> pd.DataFrame:
         if not isinstance(oos_output, WeightsOutput | PanelWeightsOutput):
             raise TypeError("AlphaEvaluator requires a WeightsOutput or PanelWeightsOutput")
+        ppy = _resolve_periods_per_year(oos_output, self.periods_per_year, "AlphaEvaluator")
         s = oos_output.strategy_returns()
         res = alpha_regression(s, self.factors, nw_lags=self.nw_lags)
         date = s.index[-1]
         return _frame(
             [
-                _row(oos_output, "alpha_ann", res.alpha * self.periods_per_year, date),
+                _row(oos_output, "alpha_ann", res.alpha * ppy, date),
                 _row(oos_output, "alpha_t", res.alpha_t, date),
             ]
         )
@@ -552,7 +659,7 @@ class TreynorEvaluator:
         *,
         market: str | None = None,
         nw_lags: int = 0,
-        periods_per_year: int = 12,
+        periods_per_year: int | None = None,
     ) -> None:
         self.factors = factors
         self.market = market
@@ -562,13 +669,14 @@ class TreynorEvaluator:
     def evaluate(self, oos_output: object) -> pd.DataFrame:
         if not isinstance(oos_output, WeightsOutput | PanelWeightsOutput):
             raise TypeError("TreynorEvaluator requires a WeightsOutput or PanelWeightsOutput")
+        ppy = _resolve_periods_per_year(oos_output, self.periods_per_year, "TreynorEvaluator")
         s = oos_output.strategy_returns()
         col = self.market if self.market is not None else str(self.factors.columns[0])
         mkt = self.factors[[col]]
         beta = float(alpha_regression(s, mkt, nw_lags=self.nw_lags).betas[0])
         joined = pd.concat([s.rename("_p"), mkt], axis=1, join="inner").dropna()
         mean_ex = float(joined["_p"].mean()) if len(joined) else float("nan")
-        treynor = float("nan") if beta == 0.0 else mean_ex * self.periods_per_year / beta
+        treynor = float("nan") if beta == 0.0 else mean_ex * ppy / beta
         return _frame([_row(oos_output, "treynor", treynor, s.index[-1])])
 
 
@@ -584,7 +692,7 @@ class InformationRatioEvaluator:
 
     requires: ClassVar[set[str]] = {capabilities.TO_WEIGHTS}
 
-    def __init__(self, benchmark: pd.Series, *, periods_per_year: int = 12) -> None:
+    def __init__(self, benchmark: pd.Series, *, periods_per_year: int | None = None) -> None:
         self.benchmark = benchmark
         self.periods_per_year = periods_per_year
 
@@ -593,12 +701,15 @@ class InformationRatioEvaluator:
             raise TypeError(
                 "InformationRatioEvaluator requires a WeightsOutput or PanelWeightsOutput"
             )
+        ppy = _resolve_periods_per_year(
+            oos_output, self.periods_per_year, "InformationRatioEvaluator"
+        )
         s = oos_output.strategy_returns()
         joined = pd.concat(
             [s.rename("_p"), self.benchmark.rename("_b")], axis=1, join="inner"
         ).dropna()
         active = (joined["_p"] - joined["_b"]).to_numpy(dtype=np.float64)
-        ann = float(np.sqrt(self.periods_per_year))
+        ann = float(np.sqrt(ppy))
         if active.size < 2 or float(np.std(active, ddof=1)) == 0.0:
             ir = float("nan")
         else:
@@ -620,13 +731,14 @@ class M2Evaluator:
 
     requires: ClassVar[set[str]] = {capabilities.TO_WEIGHTS}
 
-    def __init__(self, benchmark: pd.Series, *, periods_per_year: int = 12) -> None:
+    def __init__(self, benchmark: pd.Series, *, periods_per_year: int | None = None) -> None:
         self.benchmark = benchmark
         self.periods_per_year = periods_per_year
 
     def evaluate(self, oos_output: object) -> pd.DataFrame:
         if not isinstance(oos_output, WeightsOutput | PanelWeightsOutput):
             raise TypeError("M2Evaluator requires a WeightsOutput or PanelWeightsOutput")
+        ppy = _resolve_periods_per_year(oos_output, self.periods_per_year, "M2Evaluator")
         s = oos_output.strategy_returns()
         joined = pd.concat(
             [s.rename("_p"), self.benchmark.rename("_b")], axis=1, join="inner"
@@ -637,7 +749,7 @@ class M2Evaluator:
         if p.size < 2 or sd_p == 0.0:
             m2 = float("nan")
         else:
-            m2 = float(np.mean(p) / sd_p * np.std(b, ddof=1)) * self.periods_per_year
+            m2 = float(np.mean(p) / sd_p * np.std(b, ddof=1)) * ppy
         return _frame([_row(oos_output, "m2", m2, s.index[-1])])
 
 
@@ -653,17 +765,18 @@ class SortinoEvaluator:
 
     requires: ClassVar[set[str]] = {capabilities.TO_WEIGHTS}
 
-    def __init__(self, mar: float = 0.0, *, periods_per_year: int = 12) -> None:
+    def __init__(self, mar: float = 0.0, *, periods_per_year: int | None = None) -> None:
         self.mar = mar
         self.periods_per_year = periods_per_year
 
     def evaluate(self, oos_output: object) -> pd.DataFrame:
         if not isinstance(oos_output, WeightsOutput | PanelWeightsOutput):
             raise TypeError("SortinoEvaluator requires a WeightsOutput or PanelWeightsOutput")
+        ppy = _resolve_periods_per_year(oos_output, self.periods_per_year, "SortinoEvaluator")
         s = oos_output.strategy_returns()
         r = s.to_numpy(dtype=np.float64)
         r = r[~np.isnan(r)]
-        ann = float(np.sqrt(self.periods_per_year))
+        ann = float(np.sqrt(ppy))
         downside = np.minimum(r - self.mar, 0.0)
         dd = float(np.sqrt(np.mean(downside**2))) if r.size else float("nan")
         if r.size < 2 or dd == 0.0:

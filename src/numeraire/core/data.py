@@ -77,6 +77,22 @@ def _as_2d(frame: pd.DataFrame) -> Float:
     return np.ascontiguousarray(frame.to_numpy(dtype=np.float64))
 
 
+def _validate_horizon(horizon: int) -> int:
+    """Reject a non-positive forecast horizon (``h <= 0`` is a contemporaneous look-ahead).
+
+    A horizon of ``0`` pairs a feature at ``t`` with a return realized over ``(t, t]`` — the empty,
+    contemporaneous window that leaks — and a negative horizon reaches backwards; both are refused
+    at every surface a caller can set ``h``: the view constructors and each per-call ``horizon``
+    override (``target_asof`` / ``aligned``). ``h = 0`` also silently produces zero targets, so it
+    is rejected rather than accepted as an empty run.
+    """
+    if horizon < 1:
+        raise ValueError(
+            f"horizon must be >= 1 (h=0 is a contemporaneous look-ahead); got {horizon}"
+        )
+    return horizon
+
+
 def _to_ns(values: pd.Series | pd.DatetimeIndex, *, context: str) -> NDArray[np.int64]:
     """Datetime values → int64 nanoseconds since the epoch, at a fixed ``ns`` resolution.
 
@@ -380,10 +396,7 @@ class TimeSeriesView:
         risk_free: pd.Series | None = None,
         return_type: str = "simple",
     ) -> None:
-        if horizon < 1:
-            raise ValueError(
-                f"horizon must be >= 1 (h=0 is a contemporaneous look-ahead); got {horizon}"
-            )
+        _validate_horizon(horizon)
         return_type = _validate_return_type(return_type)
         returns = cast("pd.DataFrame", to_pandas(returns, what="returns"))
         if features is not None:
@@ -532,7 +545,7 @@ class TimeSeriesView:
 
         Compounds simple returns over the ``h`` data periods strictly after ``t``.
         """
-        h = self.horizon if horizon is None else horizon
+        h = self.horizon if horizon is None else _validate_horizon(horizon)
         ts = pd.Timestamp(t)  # pyright: ignore[reportArgumentType]
         pos = int(self._dates.searchsorted(ts, side="right")) - 1
         nan = np.full(len(self._assets), np.nan, dtype=np.float64)
@@ -549,7 +562,7 @@ class TimeSeriesView:
         (the horizon purge that kills the contemporaneous leak). ``X`` rows are lag-aware and
         concatenated across feature blocks.
         """
-        h = self.horizon if horizon is None else horizon
+        h = self.horizon if horizon is None else _validate_horizon(horizon)
         n_data = len(self._dates)
         last_ok = n_data - h - 1  # max feature position whose target lands within data
         rows_x: list[Float] = []
@@ -759,10 +772,7 @@ class CrossSectionView:
         char_blocks: Sequence[CharBlock] | None = None,
         return_type: str = "simple",
     ) -> None:
-        if horizon < 1:
-            raise ValueError(
-                f"horizon must be >= 1 (h=0 is a contemporaneous look-ahead); got {horizon}"
-            )
+        _validate_horizon(horizon)
         return_type = _validate_return_type(return_type)
         panel = cast("pd.DataFrame", to_pandas(panel, what="panel"))
         names = list(chars)
@@ -898,7 +908,7 @@ class CrossSectionView:
         self, t: object, horizon: int | None = None
     ) -> tuple[NDArray[np.object_], Float]:
         """Per-asset ``(t, t+h]`` return; ``nan`` on a gap, missing input, or horizon tail."""
-        h = self.horizon if horizon is None else horizon
+        h = self.horizon if horizon is None else _validate_horizon(horizon)
         p = self._pos_asof(t)
         if p < 0:
             return np.empty(0, dtype=object), np.empty(0, dtype=np.float64)
@@ -953,7 +963,7 @@ class CrossSectionView:
         Keeps only observations whose target is realized in-view (horizon purge / no delisting gap)
         and whose characteristics are all finite (missing-char imputation is the method's job).
         """
-        h = self.horizon if horizon is None else horizon
+        h = self.horizon if horizon is None else _validate_horizon(horizon)
         y = self._compound(self._dpos, self._codes, h)
         in_cal = np.zeros(len(self._dates), dtype=bool)
         in_cal[np.asarray(self._dates.searchsorted(self._cal))] = True

@@ -43,6 +43,7 @@ def _weights_output(returns: np.ndarray, index: pd.DatetimeIndex) -> WeightsOutp
         config_hash="cfg",
         data_vintage="synthetic",
         run_id="toy-cfg",
+        meta={"frequency": "ME"},  # monthly calendar → annualizing evaluators derive 12/sqrt(12)
     )
 
 

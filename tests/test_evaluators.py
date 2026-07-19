@@ -30,6 +30,7 @@ def _output(weights: list[float], realized: list[float]) -> WeightsOutput:
         config_hash="deadbeef",
         data_vintage="2026-06",
         run_id="toy-deadbeef",
+        meta={"frequency": "ME"},  # monthly → annualizing evaluators derive periods_per_year=12
     )
 
 
