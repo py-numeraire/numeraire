@@ -68,7 +68,14 @@ from numeraire.core.registry import (
 )
 from numeraire.core.schema import RESULT_COLUMNS, validate_result
 from numeraire.core.simulate import RebalanceSchedule, SimulationResult, simulate_weights
-from numeraire.core.sorts import SortResult, make_sorts, sort_portfolios
+from numeraire.core.sorts import (
+    SortAssignments,
+    SortResult,
+    aggregate_assigned_portfolios,
+    assign_portfolio_bins,
+    make_sorts,
+    sort_portfolios,
+)
 from numeraire.core.splitter import WalkForwardSplitter, validation_split
 from numeraire.core.stats import (
     adjust_pvalues,
@@ -113,6 +120,7 @@ __all__ = [
     "RebalanceSchedule",
     "SharpeEvaluator",
     "SimulationResult",
+    "SortAssignments",
     "SortResult",
     "SortinoEvaluator",
     "Splitter",
@@ -128,7 +136,9 @@ __all__ = [
     "WeightsOutput",
     "adjust_pvalues",
     "adjust_tests",
+    "aggregate_assigned_portfolios",
     "alpha_regression",
+    "assign_portfolio_bins",
     "available_evaluators",
     "backtest",
     "backtest_forecast",
