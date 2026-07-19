@@ -41,6 +41,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -100,6 +101,11 @@ class ReferenceResult:
     available: Callable[[], bool] | None = None
 
     def __post_init__(self) -> None:
+        # Snapshot the metric mappings into read-only copies before validating: the dataclass is
+        # frozen, but a frozen field can still point at the caller's mutable dict — mutating that
+        # dict after construction would otherwise bypass every check below.
+        object.__setattr__(self, "expected", MappingProxyType(dict(self.expected)))
+        object.__setattr__(self, "tolerance", MappingProxyType(dict(self.tolerance)))
         if not self.name:
             raise ValueError("ReferenceResult.name must be non-empty")
         if self.tier not in DATA_TIERS:
@@ -111,6 +117,22 @@ class ReferenceResult:
         stray = set(self.tolerance) - set(self.expected)
         if stray:
             raise ValueError(f"{self.name}: tolerance names non-expected metrics {sorted(stray)}")
+        # A non-finite expected value (NaN/Inf) would auto-pass its own band check — an all-NaN
+        # false green pinned at construction. A non-finite or negative tolerance is likewise
+        # vacuous (an infinite band accepts anything; a negative band can never be satisfied).
+        # Reject both here.
+        nonfinite_expected = sorted(
+            m for m, target in self.expected.items() if not math.isfinite(float(target))
+        )
+        if nonfinite_expected:
+            raise ValueError(f"{self.name}: expected value(s) {nonfinite_expected} must be finite")
+        bad_tol = sorted(
+            m
+            for m, band in self.tolerance.items()
+            if not math.isfinite(float(band)) or float(band) < 0.0
+        )
+        if bad_tol:
+            raise ValueError(f"{self.name}: tolerance(s) {bad_tol} must be finite and non-negative")
         # A zero band demands bit-exact equality, which is only meaningful for an integer target
         # (a count, N, …); a float scalar with no tolerance can never match across data vintages and
         # is almost always a forgotten band — reject it at construction.

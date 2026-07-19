@@ -9,6 +9,7 @@ import pytest
 from numeraire.core import capabilities
 from numeraire.core.engine import ForecastOutput, WeightsOutput
 from numeraire.core.evaluators import (
+    ClarkWestEvaluator,
     MeanReturnEvaluator,
     OutOfSampleR2Evaluator,
     SharpeEvaluator,
@@ -17,6 +18,7 @@ from numeraire.core.evaluators import (
 )
 from numeraire.core.registry import available_evaluators, get_evaluator
 from numeraire.core.schema import validate_result
+from numeraire.core.stats import newey_west_lrv
 
 
 def _output(weights: list[float], realized: list[float]) -> WeightsOutput:
@@ -29,6 +31,29 @@ def _output(weights: list[float], realized: list[float]) -> WeightsOutput:
         data_vintage="2026-06",
         run_id="toy-deadbeef",
     )
+
+
+def test_schema_allows_and_bounds_attrition_columns() -> None:
+    from numeraire.core.schema import ATTRITION_COLUMNS
+
+    out = _output([1.0, 1.0], [0.02, -0.01])
+    df = SharpeEvaluator().evaluate(out)
+    # attrition columns are optional: a plain weights evaluator omits them and still validates
+    validate_result(df)
+    assert not any(c in df.columns for c in ATTRITION_COLUMNS)
+    # when present they must be finite, non-negative, integer-valued counts
+    df = df.assign(n_obs=[2], n_dropped=[0])
+    validate_result(df)
+    # a genuine NaN stays legal: "not applicable" for a row from a non-attrition evaluator
+    validate_result(df.assign(n_obs=[float("nan")]))
+    with pytest.raises(ValueError, match="non-negative integer counts"):
+        validate_result(df.assign(n_dropped=[-1]))
+    with pytest.raises(ValueError, match="non-negative integer counts"):
+        validate_result(df.assign(n_obs=[0.5]))
+    with pytest.raises(ValueError, match="non-negative integer counts"):
+        validate_result(df.assign(n_obs=[float("inf")]))
+    with pytest.raises(ValueError, match="non-numeric"):
+        validate_result(df.assign(n_obs=["garbage"]))
 
 
 def test_bundled_evaluators_registered() -> None:
@@ -177,3 +202,111 @@ def test_sed_per_origin_cumsum_is_cdspe() -> None:
 def test_per_period_evaluators_registered() -> None:
     assert "strategy_return" in available_evaluators()
     assert "sed" in available_evaluators()
+
+
+# --- joint finite mask: a selectively-missing forecast can no longer manufacture skill -----------
+
+
+def test_oos_r2_joint_mask_does_not_manufacture_skill() -> None:
+    # Adversarial forecast: zero where it is present and NaN elsewhere, scored against a zero
+    # benchmark. The OLD separate-``nansum`` denominators gave the model a smaller SSE base (only
+    # the present half) than the benchmark (the whole sample), reporting large false skill: here
+    # that OLD number is ``(1 - 0.05/0.135) * 100 ~= 62.96``. The joint finite mask scores both on
+    # the *same* present half, where forecast == benchmark == 0, so honest R^2 is 0.
+    out = _forecast_output(
+        [0.0, 0.0, float("nan"), float("nan")], [0.1, 0.2, 0.15, 0.25], [0.0] * 4
+    )
+    df = OutOfSampleR2Evaluator(benchmark="zero").evaluate(out)
+    validate_result(df)
+    np.testing.assert_allclose(df.iloc[0]["value"], 0.0)
+    assert int(df.iloc[0]["n_obs"]) == 2
+    assert int(df.iloc[0]["n_dropped"]) == 2
+
+
+def test_oos_r2_raises_when_majority_missing() -> None:
+    # Joint mask drops 3 of 4 candidates (> 50%) -> fail closed rather than score a rump sample.
+    out = _forecast_output(
+        [0.0, float("nan"), float("nan"), float("nan")], [0.1, 0.2, 0.15, 0.25], [0.0] * 4
+    )
+    with pytest.raises(ValueError, match="majority-missing"):
+        OutOfSampleR2Evaluator(benchmark="zero").evaluate(out)
+
+
+def test_sed_missing_origin_scores_nan_not_zero() -> None:
+    # A forecast missing at an origin used to make ``nansum`` yield a spurious 0 there (a flat point
+    # on the CDSPE curve). It now scores NaN with n_obs=0, so the missing origin is visibly empty.
+    out = _forecast_output([0.08, float("nan"), -0.02], [0.10, 0.05, 0.00], [0.04, 0.04, 0.04])
+    df = SquaredErrorDiffEvaluator().evaluate(out)
+    validate_result(df)
+    assert np.isnan(df.iloc[1]["value"])
+    assert int(df.iloc[1]["n_obs"]) == 0
+    assert int(df.iloc[1]["n_dropped"]) == 1
+    # the present origins still score, over their joint-finite cell
+    assert np.isfinite(df.iloc[0]["value"]) and int(df.iloc[0]["n_obs"]) == 1
+
+
+def test_clark_west_drops_missing_origins_not_scores_them_as_zero() -> None:
+    # A forecast present on the first half and NaN on the second. The OLD ``nansum`` carried each
+    # missing origin as a phantom adj=0 observation, diluting the mean and inflating the effective
+    # sample of the Newey-West statistic. The NEW code drops those origins, so the statistic equals
+    # the one computed on the honest present-only sample and differs from the OLD phantom-zero one.
+    r = [0.10, 0.05, 0.08, 0.12, 0.09, 0.07, 0.11, 0.06]
+    f = [0.10, 0.05, 0.08, 0.12, float("nan"), float("nan"), float("nan"), float("nan")]
+    b = [0.04] * 8
+    out = _forecast_output(f, r, b)
+    df = ClarkWestEvaluator().evaluate(out)
+    validate_result(df)
+    cw_t_new = float(df[df["metric"] == "cw_t"].iloc[0]["value"])
+
+    rr, ff, bb = np.array(r), np.array(f), np.array(b)
+    per_cell = (rr - bb) ** 2 - ((rr - ff) ** 2 - (bb - ff) ** 2)
+    present = np.array([0, 1, 2, 3])
+
+    def _cw_t(adj: np.ndarray) -> float:
+        n = adj.size
+        se = float(np.sqrt(newey_west_lrv(adj, 0) / n))
+        return float(adj.mean() / se)
+
+    adj_new = per_cell[present]
+    adj_old = np.concatenate([adj_new, np.zeros(4)])  # OLD: missing origins as phantom zeros
+    np.testing.assert_allclose(cw_t_new, _cw_t(adj_new))
+    assert cw_t_new != pytest.approx(_cw_t(adj_old))
+    assert int(df.iloc[0]["n_obs"]) == 4 and int(df.iloc[0]["n_dropped"]) == 4
+
+
+def test_clark_west_hac_lags_respect_internal_gaps() -> None:
+    # Forecast observed at origins 0, 2, 4 and missing at 1, 3 with nw_lags=1. Lag-1
+    # autocovariances must pair observed origins exactly one period apart on the ORIGINAL axis —
+    # here there are none, so the HAC variance reduces to g0 over the three observed origins.
+    # Compacting the observed origins first (the previous behavior) treats origins two periods
+    # apart as adjacent and produces a different, wrong t-stat.
+    r = [0.5, 0.2, 1.0, 0.3, 1.5]
+    f = [0.5, float("nan"), 1.0, float("nan"), 1.5]
+    b = [0.0] * 5
+    out = _forecast_output(f, r, b)
+    df = ClarkWestEvaluator(nw_lags=1).evaluate(out)
+    validate_result(df)
+    cw_t = float(df[df["metric"] == "cw_t"].iloc[0]["value"])
+
+    rr, ff, bb = np.array(r), np.array(f), np.array(b)
+    per = (rr - bb) ** 2 - ((rr - ff) ** 2 - (bb - ff) ** 2)
+    vals = per[[0, 2, 4]]  # the per-origin adjusted loss differences actually observed
+    n = 3
+    v = vals - vals.mean()
+    g0 = float(v @ v) / n
+    t_correct = float(vals.mean() / np.sqrt(g0 / n))  # lag-1 term: no adjacent observed pair
+    # the compacted-axis statistic (wrong): adjacent compacted entries treated as lag-1 pairs
+    lrv_compacted = g0 + 2.0 * (1.0 - 1.0 / 2.0) * float(v[1:] @ v[:-1]) / n
+    t_compacted = float(vals.mean() / np.sqrt(lrv_compacted / n))
+    assert t_compacted != pytest.approx(t_correct)
+    np.testing.assert_allclose(cw_t, t_correct)
+    assert cw_t != pytest.approx(t_compacted)
+
+
+def test_forecast_evaluators_raise_on_empty_output() -> None:
+    # An empty ForecastOutput is a normal engine result for a view too short to produce any
+    # evaluation window; scoring it must be a clear refusal, not a crash or a silent empty frame.
+    out = _forecast_output([], [], [])
+    for ev in (OutOfSampleR2Evaluator(), SquaredErrorDiffEvaluator(), ClarkWestEvaluator()):
+        with pytest.raises(ValueError, match="no candidate observations"):
+            ev.evaluate(out)
