@@ -55,7 +55,8 @@ engine-round-trip checks all apply to it exactly as they do to a weights method.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import copy
+from collections.abc import Callable, Iterator
 from typing import Any, cast
 
 import numpy as np
@@ -102,6 +103,21 @@ _CORE_CAPS = frozenset({capabilities.TO_WEIGHTS, capabilities.TO_FORECAST, capab
 
 
 # --------------------------------------------------------------------------- internals
+
+
+class _ReplayFolds:
+    """Re-iterable splitter over folds materialized once from a caller-supplied splitter.
+
+    ``check_fold_isolation`` runs its driver three times; materializing the caller's folds once and
+    replaying them keeps a one-shot ``split`` iterator from silently emptying the later runs.
+    """
+
+    def __init__(self, folds: list[tuple[Any, Any]]) -> None:
+        self._folds = folds
+
+    def split(self, view: Any) -> Iterator[tuple[Any, Any]]:
+        _ = view
+        return iter(self._folds)
 
 
 def _fit(estimator: Any, view: Any) -> Any:
@@ -310,15 +326,26 @@ def check_output_shapes(estimator: Any, view_factory: ViewFactory) -> None:
     if capabilities.TO_PRICING in caps:
         p = _expected_returns(model, view)
         assert set(map(str, p.columns)) <= assets, "expected_returns columns must be ⊆ view.assets"
-        assert p.columns.is_unique, (
-            "expected_returns columns must be unique labels (duplicates break alignment)"
+        # Uniqueness must hold on the str-normalized labels the engine pools on: an int column and
+        # its str twin are distinct raw labels but collapse to one asset after normalization.
+        assert pd.Index([str(c) for c in p.columns]).is_unique, (
+            "expected_returns columns must be unique labels after str normalization "
+            "(an int label and its str twin would collide)"
         )
-        # Duplicate prediction dates pool as distinct OOS observations — the driver rejects them, so
-        # the shape check surfaces the same violation before an engine run does.
-        assert p.index.is_unique, (
-            "expected_returns index must be unique dates (duplicates break realized alignment)"
-        )
-        assert set(p.index) <= set(view.calendar), "expected_returns index must be ⊆ view.calendar"
+        # Mirror the driver's containment guard exactly (a violation the shape check accepted
+        # would only resurface later as an engine error): DatetimeIndex + unique dates, with the
+        # engine's zero-row "prices nothing" convention (a plain empty index) exempted.
+        if len(p.index) > 0:
+            assert isinstance(p.index, pd.DatetimeIndex), (
+                "expected_returns index must be a DatetimeIndex (an object index of timestamps "
+                "is rejected by the pricing drivers)"
+            )
+            assert p.index.is_unique, (
+                "expected_returns index must be unique dates (duplicates break realized alignment)"
+            )
+            assert set(p.index) <= set(view.calendar), (
+                "expected_returns index must be ⊆ view.calendar"
+            )
 
 
 def check_determinism(estimator: Any, view_factory: ViewFactory) -> None:
@@ -458,25 +485,41 @@ def check_fold_isolation(
     cannot depend on which other folds ran first or on the ``n_jobs`` worker schedule — even for a
     stateful estimator (a warm start seeded from the last fit, a cached statistic). This runs the
     estimator's matching driver serially (``n_jobs=1``) and in parallel (``n_jobs=4``) and requires
-    the OOS panels to be bit-identical, plus a third fresh serial run identical to the first (a
-    driver never mutates the passed instance). An engine that shared one mutable estimator across
-    parallel folds makes the ``n_jobs=4`` run diverge here; per-fold isolation makes the property
-    hold. Complements :func:`check_fit_independence` — that probes the estimator's own fit purity;
-    this probes that the *engine* actually isolates each fold, so a stateful estimator stays
-    reproducible regardless of ``n_jobs``.
+    the OOS panels to be bit-identical, plus a third fresh serial run identical to the first. The
+    capability probe itself fits a ``deepcopy``, so the supplied estimator reaches every run in its
+    pristine pre-fit state. An engine that shared one mutable estimator across parallel folds makes
+    the ``n_jobs=4`` run diverge here; per-fold isolation makes the property hold. A caller-supplied
+    splitter must yield **at least two folds** — with a single fold the parallel run never exercises
+    the thread pool and the check would certify nothing. Complements
+    :func:`check_fit_independence` — that probes the estimator's own fit purity; this probes that
+    the *engine* actually isolates each fold, so a stateful estimator stays reproducible regardless
+    of ``n_jobs``. (An estimator whose fit is nondeterministic also fails here; run
+    :func:`check_determinism` to tell the two causes apart.)
     """
     view = view_factory()
-    caps = _caps(_fit(estimator, view))
+    # Probe capabilities on a deepcopy: fitting the supplied instance here would advance any
+    # across-fit state before the measured runs, breaking the pristine-estimator premise.
+    caps = _caps(_fit(copy.deepcopy(estimator), view))
     n = len(view.calendar)
     warmup = min_train if min_train is not None else max(2, n // 2)
 
     def _multifold() -> Any:
-        # Several folds so n_jobs=4 exercises real thread-level parallelism (a single fold would
-        # never dispatch to the pool, hiding a scheduling-dependent divergence).
+        # Several folds so n_jobs=4 exercises real thread-level parallelism (a single fold never
+        # dispatches to the pool, hiding a scheduling-dependent divergence). A caller-supplied
+        # splitter is materialized once — so the requirement is checked and a one-shot ``split``
+        # iterator survives the three runs — and replayed through a re-iterable stand-in.
+        if splitter is not None:
+            folds = list(splitter.split(view))
+            if len(folds) < 2:
+                raise ValueError(
+                    f"check_fold_isolation needs a splitter yielding at least two folds (got "
+                    f"{len(folds)}): with a single fold the parallel run never exercises the "
+                    "thread pool, so serial-vs-parallel identity would be vacuous — supply a "
+                    "splitter producing two or more folds"
+                )
+            return _ReplayFolds(folds)
         rest = max(1, n - warmup)
-        return splitter or WalkForwardSplitter(
-            min_train=warmup, test_size=max(1, rest // 3), expanding=True
-        )
+        return WalkForwardSplitter(min_train=warmup, test_size=max(1, rest // 3), expanding=True)
 
     def _compare(primary: Any, others: list[tuple[Any, str]], attrs: tuple[str, ...]) -> None:
         for other, label in others:
@@ -484,8 +527,10 @@ def check_fold_isolation(
                 _assert_bit_identical(
                     getattr(primary, attr),
                     getattr(other, attr),
-                    f"walk-forward {attr} under {label} differs from the serial run — a fold's "
-                    "result depends on execution order (shared mutable estimator across folds)",
+                    f"walk-forward {attr} under {label} differs from the serial run — either a "
+                    "fold's result depends on execution order (fit-relevant mutable state shared "
+                    "across fold fits) or the estimator's fit is nondeterministic (an unseeded "
+                    "RNG fails here too; run check_determinism to distinguish)",
                 )
 
     if capabilities.TO_WEIGHTS in caps and isinstance(view, TimeSeriesView):
