@@ -36,6 +36,11 @@ Versions are tag-driven (`hatch-vcs`).
 - `newey_west_lrv` accepts an optional `valid` observation mask: autocovariances then pair only
   observed positions exactly the lag apart on the original time axis, keeping HAC lags meaningful
   for a series with internal gaps. The default (no mask) is the previous dense behavior.
+- `numeraire.testing.check_fold_isolation` — a conformance check that the engine isolates every
+  fold: a stateful estimator's matching walk-forward driver produces bit-identical output under
+  `n_jobs=1` and `n_jobs=4` (and on a fresh serial rerun). Where `check_fit_independence` probes the
+  estimator's own fit purity, this probes that the engine's per-fold isolation holds. Runs in the
+  default `check_estimator` battery immediately after `check_fit_independence`.
 
 ### Changed
 
@@ -67,6 +72,17 @@ Versions are tag-driven (`hatch-vcs`).
   driver's first fit uses. The user splitter's `split(view)` is consulted exactly once (its folds
   are materialized and replayed to the driver), so a splitter whose `split` returns a one-shot
   iterator loses no folds. Output is unchanged for stateless estimators.
+- **Breaking — every backtest fit now runs on an isolated `copy.deepcopy` of the estimator.** All
+  four drivers (`backtest_weights`, `backtest_forecast`, `backtest_panel`, `backtest_pricing`), the
+  in-sample pricing path, and `backtest()`'s capability-probe fit deep-copy the estimator before
+  fitting — uniformly, serial *and* parallel. A fold's result therefore can no longer depend on
+  which other folds were fitted first or on the `n_jobs` thread schedule (previously the drivers
+  fitted one shared instance, so a stateful estimator's serial and parallel results diverged), and a
+  backtest never mutates the estimator the caller passed. Output is unchanged for stateless
+  estimators; an estimator that deliberately relied on cross-fold warm-start / cached state now sees
+  each fold fitted from its pristine pre-fit state. The single new requirement: **the estimator must
+  be deepcopy-able** — one holding an un-copyable resource (a live DB handle) belongs behind a
+  factory that builds it at `fit` time. Copying a pre-fit estimator is cheap next to the fit.
 - **Breaking — point-in-time availability is now a real-timestamp comparison.** `VintagedBlock` and
   `CharBlock` previously decided what was "known" by comparing calendar *month ordinals*, so a row
   or release stamped later in the same month counted as already available — a silent intra-month
@@ -113,6 +129,16 @@ Versions are tag-driven (`hatch-vcs`).
   expected value or an infinite band would previously auto-pass its own `check`, letting a vacuous
   "verified" reproduction be registered; the existing exact-match guard (a zero band on an integer
   target stays legal) is unchanged.
+- The forecast and pricing drivers now contain their model's output to the fold, closing the last
+  two gaps left after the weights/panel guards. `backtest_pricing` /
+  `backtest_pricing_in_sample` reject an `expected_returns` panel whose dates are not a unique
+  `DatetimeIndex` inside the fold's calendar, or that carries an asset absent from the view —
+  validated **before** the structural horizon tail is dropped, so a bad date or phantom asset hidden
+  in that tail cannot slip through (previously an out-of-fold or duplicated date was pooled as a
+  genuine OOS observation). `backtest_forecast` rejects a forecast whose asset labels are
+  non-unique or carry a label absent from the view (previously a phantom asset was silently dropped,
+  scored as an abstention; a duplicate label raised a cryptic pandas error). All messages name the
+  method. `check_output_shapes` gains the matching pricing-index-uniqueness assertion.
 - Portfolio sorts no longer let holding-period return availability change formation-period
   breakpoints or bin membership. Signals, returns, weights, eligibility, and breakpoint-universe
   masks are validated on unique axes and aligned by pandas labels; missing mask values mean false,
