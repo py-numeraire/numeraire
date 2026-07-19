@@ -68,21 +68,36 @@ def _deprecated_alias(replacement: Callable[_P, _RT], *, old: str, new: str) -> 
     return _alias
 
 
-def newey_west_lrv(x: Float, lags: int = 0) -> float:
+def newey_west_lrv(x: Float, lags: int = 0, valid: NDArray[np.bool_] | None = None) -> float:
     """Bartlett-kernel long-run variance of a 1-D series (``lags=0`` = plain variance, MLE).
 
     ``lrv = g0 + 2 * sum_{l=1..lags} (1 - l/(lags+1)) * g_l`` with ``g_l`` the lag-``l``
     autocovariance (denominator ``T``).
+
+    ``valid`` (optional, same shape as ``x``) marks which positions are observed. When given, the
+    mean and every autocovariance use only the observed values, and lag-``l`` pairs are formed from
+    observations exactly ``l`` positions apart **on the original axis** (with ``n`` = the number of
+    observed positions). This keeps HAC lags meaningful for a series with internal gaps —
+    compacting the gaps away would treat observations several periods apart as adjacent. The
+    default (``None``) is the dense behavior: every position observed.
     """
     if lags < 0:
         raise ValueError(f"lags must be >= 0; got {lags}")
     v = np.asarray(x, dtype=np.float64)
-    v = v - v.mean()
-    n = len(v)
+    if valid is None:
+        m = np.ones(v.shape, dtype=np.bool_)
+    else:
+        m = np.asarray(valid, dtype=np.bool_)
+        if m.shape != v.shape:
+            raise ValueError("valid mask must have the same shape as the series")
+    n = int(np.count_nonzero(m))
     if n == 0:
         return float("nan")
+    # Demean over the observed positions; zero the unobserved ones so every product touching an
+    # unobserved position drops out of the sums below.
+    v = np.where(m, v - v[m].mean(), 0.0)
     lrv = float(v @ v) / n
-    for lag in range(1, min(lags, n - 1) + 1):
+    for lag in range(1, min(lags, len(v) - 1) + 1):
         w = 1.0 - lag / (lags + 1.0)
         lrv += 2.0 * w * float(v[lag:] @ v[:-lag]) / n
     return lrv

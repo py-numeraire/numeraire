@@ -41,11 +41,19 @@ def test_schema_allows_and_bounds_attrition_columns() -> None:
     # attrition columns are optional: a plain weights evaluator omits them and still validates
     validate_result(df)
     assert not any(c in df.columns for c in ATTRITION_COLUMNS)
-    # when present they must be non-negative counts
+    # when present they must be finite, non-negative, integer-valued counts
     df = df.assign(n_obs=[2], n_dropped=[0])
     validate_result(df)
-    with pytest.raises(ValueError, match="non-negative counts"):
+    # a genuine NaN stays legal: "not applicable" for a row from a non-attrition evaluator
+    validate_result(df.assign(n_obs=[float("nan")]))
+    with pytest.raises(ValueError, match="non-negative integer counts"):
         validate_result(df.assign(n_dropped=[-1]))
+    with pytest.raises(ValueError, match="non-negative integer counts"):
+        validate_result(df.assign(n_obs=[0.5]))
+    with pytest.raises(ValueError, match="non-negative integer counts"):
+        validate_result(df.assign(n_obs=[float("inf")]))
+    with pytest.raises(ValueError, match="non-numeric"):
+        validate_result(df.assign(n_obs=["garbage"]))
 
 
 def test_bundled_evaluators_registered() -> None:
@@ -264,3 +272,41 @@ def test_clark_west_drops_missing_origins_not_scores_them_as_zero() -> None:
     np.testing.assert_allclose(cw_t_new, _cw_t(adj_new))
     assert cw_t_new != pytest.approx(_cw_t(adj_old))
     assert int(df.iloc[0]["n_obs"]) == 4 and int(df.iloc[0]["n_dropped"]) == 4
+
+
+def test_clark_west_hac_lags_respect_internal_gaps() -> None:
+    # Forecast observed at origins 0, 2, 4 and missing at 1, 3 with nw_lags=1. Lag-1
+    # autocovariances must pair observed origins exactly one period apart on the ORIGINAL axis —
+    # here there are none, so the HAC variance reduces to g0 over the three observed origins.
+    # Compacting the observed origins first (the previous behavior) treats origins two periods
+    # apart as adjacent and produces a different, wrong t-stat.
+    r = [0.5, 0.2, 1.0, 0.3, 1.5]
+    f = [0.5, float("nan"), 1.0, float("nan"), 1.5]
+    b = [0.0] * 5
+    out = _forecast_output(f, r, b)
+    df = ClarkWestEvaluator(nw_lags=1).evaluate(out)
+    validate_result(df)
+    cw_t = float(df[df["metric"] == "cw_t"].iloc[0]["value"])
+
+    rr, ff, bb = np.array(r), np.array(f), np.array(b)
+    per = (rr - bb) ** 2 - ((rr - ff) ** 2 - (bb - ff) ** 2)
+    vals = per[[0, 2, 4]]  # the per-origin adjusted loss differences actually observed
+    n = 3
+    v = vals - vals.mean()
+    g0 = float(v @ v) / n
+    t_correct = float(vals.mean() / np.sqrt(g0 / n))  # lag-1 term: no adjacent observed pair
+    # the compacted-axis statistic (wrong): adjacent compacted entries treated as lag-1 pairs
+    lrv_compacted = g0 + 2.0 * (1.0 - 1.0 / 2.0) * float(v[1:] @ v[:-1]) / n
+    t_compacted = float(vals.mean() / np.sqrt(lrv_compacted / n))
+    assert t_compacted != pytest.approx(t_correct)
+    np.testing.assert_allclose(cw_t, t_correct)
+    assert cw_t != pytest.approx(t_compacted)
+
+
+def test_forecast_evaluators_raise_on_empty_output() -> None:
+    # An empty ForecastOutput is a normal engine result for a view too short to produce any
+    # evaluation window; scoring it must be a clear refusal, not a crash or a silent empty frame.
+    out = _forecast_output([], [], [])
+    for ev in (OutOfSampleR2Evaluator(), SquaredErrorDiffEvaluator(), ClarkWestEvaluator()):
+        with pytest.raises(ValueError, match="no candidate observations"):
+            ev.evaluate(out)

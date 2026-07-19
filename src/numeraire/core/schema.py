@@ -6,6 +6,7 @@ so the plotting choice stays decoupled. Stability is promised on this schema (se
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 RESULT_COLUMNS: tuple[str, ...] = (
@@ -36,7 +37,8 @@ squared-error difference, Clark-West, the cross-sectional pricing metrics) attac
 size of the joint finite sample the metric was computed on — and ``n_dropped`` — the count of
 candidate observations excluded by that joint mask. They make selective missingness auditable on the
 row itself. They are *optional*: rows from evaluators without a benchmark comparison omit them, and
-:func:`validate_result` never requires them (only that, when present, they are non-negative counts).
+:func:`validate_result` never requires them (only that every non-null cell is a finite,
+non-negative, integer-valued count).
 """
 
 
@@ -44,8 +46,9 @@ def validate_result(df: pd.DataFrame) -> None:
     """Raise ``ValueError`` if ``df`` violates the result schema.
 
     Enforces that every column in :data:`RESULT_COLUMNS` is present; extra columns are allowed. When
-    the optional :data:`ATTRITION_COLUMNS` are present they must hold non-negative counts (no
-    negative or non-finite attrition), but they are never required.
+    the optional :data:`ATTRITION_COLUMNS` are present, every non-null cell must be a finite,
+    non-negative, integer-valued numeric (a count); non-numeric cells are rejected rather than
+    coerced away. The columns themselves are never required.
     """
     present = {str(c) for c in df.columns}
     missing = [c for c in RESULT_COLUMNS if c not in present]
@@ -54,8 +57,18 @@ def validate_result(df: pd.DataFrame) -> None:
     for col in ATTRITION_COLUMNS:
         if col in present:
             # NaN is a legitimate "not applicable" for a row from an evaluator that emits no
-            # attrition (e.g. concatenated with benchmark-comparison rows); only reject a present
-            # value that is negative or infinite.
-            values = pd.to_numeric(df[col], errors="coerce").dropna()
-            if bool((values < 0).any()) or bool((values == float("inf")).any()):
-                raise ValueError(f"result column {col!r} must hold non-negative counts")
+            # attrition (e.g. concatenated with benchmark-comparison rows); every other cell must
+            # be a genuine count.
+            raw = df[col]
+            numeric = pd.to_numeric(raw, errors="coerce")
+            if bool((numeric.isna() & raw.notna()).any()):
+                raise ValueError(f"result column {col!r} holds non-numeric values")
+            counts = numeric.dropna().to_numpy(dtype=np.float64)
+            if counts.size and (
+                not bool(np.isfinite(counts).all())
+                or bool((counts < 0).any())
+                or bool((counts != np.floor(counts)).any())
+            ):
+                raise ValueError(
+                    f"result column {col!r} must hold finite non-negative integer counts"
+                )

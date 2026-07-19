@@ -145,8 +145,10 @@ def test_zero_band_demands_exact_match() -> None:
         ({"tolerance": {"nope": 0.1}}, "non-expected metrics"),
         ({"name": ""}, "must be non-empty"),
         ({"expected": {"r2": 3.51}}, "zero tolerance band but a non-integer"),
-        ({"expected": {"m": float("nan")}}, "must be finite"),
-        ({"expected": {"m": float("inf")}}, "must be finite"),
+        # a positive finite tolerance so only the non-finite expected value itself can trip —
+        # without one, the zero-band-on-a-float guard would already reject these cases
+        ({"expected": {"m": float("nan")}, "tolerance": {"m": 0.1}}, "must be finite"),
+        ({"expected": {"m": float("inf")}, "tolerance": {"m": 0.1}}, "must be finite"),
         ({"expected": {"m": 1.0}, "tolerance": {"m": -0.1}}, "must be finite and non-negative"),
         (
             {"expected": {"m": 1.0}, "tolerance": {"m": float("inf")}},
@@ -163,6 +165,29 @@ def test_post_init_validation(kwargs: dict[str, object], match: str) -> None:
     base.update(kwargs)
     with pytest.raises(ValueError, match=match):
         ReferenceResult(**base)  # type: ignore[arg-type]
+
+
+def test_metric_mappings_snapshot_defeats_later_mutation() -> None:
+    # The dataclass is frozen, but a frozen field could still point at the caller's mutable dict.
+    # Construction must snapshot expected/tolerance so post-construction mutation of the caller's
+    # dicts cannot bypass the validation that already ran.
+    expected = {"m": 1.0}
+    tolerance = {"m": 0.1}
+    case = ReferenceResult(
+        name="mut",
+        paper="p",
+        venue="v",
+        year=2020,
+        table="t",
+        expected=expected,
+        tolerance=tolerance,
+    )
+    expected["m"] = float("nan")  # would auto-pass check() if it reached the case
+    tolerance["m"] = float("inf")  # would accept anything if it reached the case
+    case.check({"m": 1.05})  # still the validated 1.0 +/- 0.1
+    with pytest.raises(AssertionError):
+        case.check({"m": 2.0})  # the infinite band did not leak in
+    assert case.expected["m"] == 1.0 and case.tolerance["m"] == 0.1
 
 
 # --------------------------------------------------------------------------------- registry

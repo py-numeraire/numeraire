@@ -117,17 +117,28 @@ def _joint_finite_mask(*arrays: np.ndarray) -> np.ndarray:
     return mask
 
 
-def _attrition(mask: np.ndarray, evaluator: str) -> tuple[int, int]:
+def _attrition(
+    mask: np.ndarray, evaluator: str, *, candidates: np.ndarray | None = None
+) -> tuple[int, int]:
     """Return ``(n_obs, n_dropped)`` for ``mask``; raise if it drops a majority of candidates.
 
     ``n_obs`` is the joint finite sample size, ``n_dropped`` the number of candidate observations
-    the joint mask excluded. Dropping more than :data:`_MAX_DROP_FRACTION` of the candidates raises
-    ``ValueError`` (fail closed — a majority-missing comparison is not scored).
+    the joint mask excluded. ``candidates`` (optional, same shape) narrows what counts as a
+    candidate: cells outside it are *structural* — absent on every side of the comparison (e.g. an
+    asset not yet in a ragged pricing universe) — and count neither as observed nor as dropped.
+    The default is every cell (dense engine outputs). An empty candidate set raises ``ValueError``
+    (there is nothing to score — e.g. an empty output from a view too short to produce any
+    evaluation window), and dropping more than :data:`_MAX_DROP_FRACTION` of the candidates raises
+    as well (fail closed — a majority-missing comparison is not scored).
     """
-    total = int(mask.size)
+    total = int(mask.size) if candidates is None else int(np.count_nonzero(candidates))
     n_obs = int(np.count_nonzero(mask))
     n_dropped = total - n_obs
-    if total > 0 and n_dropped > _MAX_DROP_FRACTION * total:
+    if total == 0:
+        raise ValueError(
+            f"{evaluator}: no candidate observations to score (empty comparison output)"
+        )
+    if n_dropped > _MAX_DROP_FRACTION * total:
         raise ValueError(
             f"{evaluator}: joint finite sample drops {n_dropped}/{total} candidate observations "
             f"(> {_MAX_DROP_FRACTION:.0%}); refusing to score a majority-missing comparison"
@@ -389,18 +400,23 @@ class ClarkWestEvaluator:
         b = oos_output.benchmark.to_numpy(dtype=np.float64)
         # One joint finite mask over the (origin x asset) cells, bounded attrition. The per-origin
         # adjusted loss difference is summed over its joint-finite cells only, and an origin with no
-        # joint-finite cell is *dropped* from the time series (not carried as a phantom 0 that would
-        # bias the mean and inflate the effective sample of the Newey-West statistic).
+        # joint-finite cell is excluded from the mean and the variance (not carried as a phantom 0
+        # that would bias the mean and inflate the effective sample). The HAC variance is computed
+        # on the ORIGINAL origin axis — lag-l autocovariances pair only observed origins exactly l
+        # positions apart — so an internal gap does not make origins two periods apart look
+        # adjacent (which compacting the observed origins together would).
         mask = _joint_finite_mask(r, f, b)
         n_obs, n_dropped = _attrition(mask, "ClarkWestEvaluator")
         per_cell = (r - b) ** 2 - ((r - f) ** 2 - (b - f) ** 2)
-        adj = np.array(
-            [per_cell[i][mask[i]].sum() for i in range(r.shape[0]) if mask[i].any()],
-            dtype=np.float64,
+        observed = mask.any(axis=1)
+        adj = np.where(mask, per_cell, 0.0).sum(axis=1)
+        n = int(np.count_nonzero(observed))
+        se = (
+            float(np.sqrt(newey_west_lrv(adj, self.nw_lags, valid=observed) / n))
+            if n
+            else float("nan")
         )
-        n = adj.size
-        se = float(np.sqrt(newey_west_lrv(adj, self.nw_lags) / n)) if n else float("nan")
-        t_stat = float(adj.mean() / se) if n and se > 0 else float("nan")
+        t_stat = float(adj[observed].mean() / se) if n and se > 0 else float("nan")
         p = float(norm.sf(t_stat)) if np.isfinite(t_stat) else float("nan")
         date = oos_output.forecasts.index[-1]
         return _frame(
@@ -665,13 +681,17 @@ def _pricing_means(
     Each asset's predicted and realized means are taken over the *same* origins — those where both
     are finite — so a period present in one series but missing in the other can never pull the two
     means off a different sample. Assets with no jointly-observed origin drop out (``finite`` is
-    ``False``). ``n_obs`` / ``n_dropped`` count the jointly-finite vs. excluded ``(origin x asset)``
-    candidate cells across the panel; a majority-missing panel raises (see :func:`_attrition`).
+    ``False``). ``n_obs`` / ``n_dropped`` count the jointly-finite vs. excluded *candidate* cells:
+    a candidate is a cell where **either** side is finite. A cell absent on both sides is
+    structural (a ragged universe legitimately leaves an entering/exiting asset unpriced and
+    unrealized) and counts neither as observed nor as dropped; one-sided missingness still counts
+    as dropped. A majority-missing candidate set raises (see :func:`_attrition`).
     """
     p = out.predicted.to_numpy(dtype=np.float64)
     r = out.realized.to_numpy(dtype=np.float64)
     mask = _joint_finite_mask(p, r)
-    n_obs, n_dropped = _attrition(mask, "pricing evaluator")
+    candidates = np.isfinite(p) | np.isfinite(r)
+    n_obs, n_dropped = _attrition(mask, "pricing evaluator", candidates=candidates)
     pj = np.where(mask, p, np.nan)
     rj = np.where(mask, r, np.nan)
     with warnings.catch_warnings():

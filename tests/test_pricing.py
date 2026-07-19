@@ -251,6 +251,35 @@ def test_pricing_evaluator_raises_when_majority_missing() -> None:
         AverageAbsAlphaEvaluator().evaluate(out)
 
 
+def test_pricing_sparse_universe_counts_only_candidate_cells() -> None:
+    # An entering/exiting universe: each asset exists (predicted AND realized) on exactly one date.
+    # The 12 cells absent on both sides are structural — a legitimately sparse panel, not model
+    # attrition — so nothing counts as dropped and the evaluator must not fail closed.
+    idx = pd.date_range("2000-01-31", periods=4, freq="ME")
+    cols = ["a", "b", "c", "d"]
+    diag = np.full((4, 4), np.nan)
+    np.fill_diagonal(diag, [0.01, 0.02, 0.03, 0.04])
+    predicted = pd.DataFrame(diag, index=idx, columns=cols)
+    realized = pd.DataFrame(diag * 2.0, index=idx, columns=cols)
+    out = _pricing_output(predicted, realized, "walk_forward")
+    df = AverageAbsAlphaEvaluator().evaluate(out)
+    validate_result(df)
+    assert int(df.iloc[0]["n_obs"]) == 4
+    assert int(df.iloc[0]["n_dropped"]) == 0
+    np.testing.assert_allclose(df.iloc[0]["value"], np.mean([0.01, 0.02, 0.03, 0.04]))
+
+
+def test_pricing_evaluators_raise_on_empty_output() -> None:
+    # An empty pricing panel has nothing to score; refusal must be a clear ValueError, not a
+    # NaN/NaT row that looks like a computed result.
+    empty = pd.DataFrame(columns=["a", "b"], index=pd.DatetimeIndex([]))
+    out = _pricing_output(empty, empty.copy(), "walk_forward")
+    with pytest.raises(ValueError, match="no candidate observations"):
+        CrossSectionalR2Evaluator().evaluate(out)
+    with pytest.raises(ValueError, match="no candidate observations"):
+        AverageAbsAlphaEvaluator().evaluate(out)
+
+
 def test_pricing_evaluators_reject_wrong_output() -> None:
     with pytest.raises(TypeError):
         CrossSectionalR2Evaluator().evaluate(object())

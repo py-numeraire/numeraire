@@ -41,6 +41,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -100,6 +101,11 @@ class ReferenceResult:
     available: Callable[[], bool] | None = None
 
     def __post_init__(self) -> None:
+        # Snapshot the metric mappings into read-only copies before validating: the dataclass is
+        # frozen, but a frozen field can still point at the caller's mutable dict — mutating that
+        # dict after construction would otherwise bypass every check below.
+        object.__setattr__(self, "expected", MappingProxyType(dict(self.expected)))
+        object.__setattr__(self, "tolerance", MappingProxyType(dict(self.tolerance)))
         if not self.name:
             raise ValueError("ReferenceResult.name must be non-empty")
         if self.tier not in DATA_TIERS:
