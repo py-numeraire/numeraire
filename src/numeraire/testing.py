@@ -63,7 +63,7 @@ import numpy as np
 import pandas as pd
 
 from numeraire.core import capabilities
-from numeraire.core.data import CrossSectionView, TimeSeriesView
+from numeraire.core.data import CrossSectionView, TimeSeriesView, _adopt_provenance
 from numeraire.core.engine import (
     backtest_forecast,
     backtest_panel,
@@ -218,7 +218,10 @@ def _perturb_after(view: Any, t: pd.Timestamp) -> Any:
 
     Rebuilt from the view's own ejected frames, so an estimator whose output at some date ``d <= t``
     depends on data after ``t`` (a look-ahead leak) produces different outputs on the two twins.
-    Handles the two concrete core view types.
+    Handles the two concrete core view types. The ejected returns are already converted to simple,
+    so the twin is built with the default ``return_type`` and the source's ingestion provenance is
+    carried over unchanged — an estimator reading the public ``provenance`` property sees identical
+    values on both twins (no false leak signal, no double conversion).
     """
     rng = np.random.default_rng(0xC0FFEE)
     if isinstance(view, TimeSeriesView):
@@ -232,15 +235,17 @@ def _perturb_after(view: Any, t: pd.Timestamp) -> Any:
             feat.loc[fmask] = feat.loc[fmask].to_numpy() * (
                 1.0 + rng.normal(0.0, 0.1, feat.loc[fmask].shape)
             )
-            return TimeSeriesView(ret, feat, horizon=view.horizon)
-        return TimeSeriesView(ret, horizon=view.horizon)
+            return _adopt_provenance(TimeSeriesView(ret, feat, horizon=view.horizon), view)
+        return _adopt_provenance(TimeSeriesView(ret, horizon=view.horizon), view)
     if isinstance(view, CrossSectionView):
         pf = view.panel_frame().reset_index()
         mask = pf["date"] > t
         n_after = int(mask.to_numpy().sum())
         for col in [*view.char_names, "ret"]:
             pf.loc[mask, col] = pf.loc[mask, col].to_numpy() + rng.normal(0.0, 0.1, n_after)
-        return CrossSectionView(pf, chars=view.char_names, horizon=view.horizon)
+        return _adopt_provenance(
+            CrossSectionView(pf, chars=view.char_names, horizon=view.horizon), view
+        )
     raise TypeError(
         f"check_no_lookahead cannot perturb a {type(view).__name__}; pass a TimeSeriesView "
         "or CrossSectionView (or run the other checks individually)"

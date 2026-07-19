@@ -104,13 +104,17 @@ def test_walk_forward_multi_asset_end_to_end() -> None:
     np.testing.assert_allclose(out.strategy_returns().to_numpy(), manual)
 
 
-def test_excess_log_vs_simple_differ() -> None:
+def test_log_return_input_converted_to_simple() -> None:
     raw, rf = toy_market()
     preds = toy_predictors()
-    simple = TimeSeriesView(raw, preds, risk_free=rf, excess="simple").returns_frame()
-    log = TimeSeriesView(raw, preds, risk_free=rf, excess="log").returns_frame()
-    # both valid excess series, but the log construction is not identical to the simple one
+    # Same numeric arrays declared under different input conventions must differ once converted:
+    # the log-declared inputs are expm1'd at ingestion, so their excess series differs from simple.
+    simple = TimeSeriesView(raw, preds, risk_free=rf, return_type="simple").returns_frame()
+    log = TimeSeriesView(raw, preds, risk_free=rf, return_type="log").returns_frame()
     assert not np.allclose(simple.to_numpy(), log.to_numpy())
+    # the log path is exactly expm1(raw) - expm1(rf), verifying the ingestion conversion
+    expected = np.expm1(raw.to_numpy()) - np.expm1(rf.to_numpy())[:, None]
+    np.testing.assert_allclose(log.to_numpy(), expected)
 
 
 # --- multi-asset + predictors: shapes and horizon ------------------------------------------------
