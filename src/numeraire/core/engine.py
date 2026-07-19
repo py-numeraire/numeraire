@@ -15,6 +15,7 @@ If it feeds an evaluator it is an ``Output``; if it is a computed answer it is a
 
 from __future__ import annotations
 
+import copy
 import functools
 import hashlib
 import json
@@ -363,6 +364,41 @@ def config_hash(config: dict[str, Any] | None) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 
+def _fit_isolated(estimator: Estimator, view: Any, method: str) -> Any:
+    """Deep-copy ``estimator``, fit the private copy, and return the fitted model.
+
+    Every driver fits an isolated copy rather than the caller's instance — uniformly, serial *and*
+    parallel. A fold's result therefore does not depend on which other folds were fitted first or
+    on the thread-pool schedule, even for a stateful estimator (a warm start seeded from the last
+    fit, a cached statistic): with ``n_jobs>1`` two workers would otherwise race on the same object,
+    and serially the fits would chain. Isolation also mechanically enforces cross-fold fit purity,
+    complementing :func:`numeraire.testing.check_fit_independence`.
+
+    Two contracts this imposes on estimators:
+
+    - **Deepcopy-able.** A pre-fit estimator is a parameter object, so the copy is cheap next to
+      the fit it precedes. An estimator that holds an un-copyable resource (a live DB handle, an
+      open socket) belongs behind a factory that builds that resource at ``fit`` time, not stored
+      on the instance. A failing deepcopy raises a contextual ``TypeError`` naming the method.
+    - **No fit-relevant mutable state shared across copies.** ``copy.deepcopy`` cannot sever class
+      attributes, module globals, or containers a custom ``__deepcopy__`` deliberately aliases; an
+      estimator that routes fit state through such shared channels defeats the isolation (and can
+      still observe or mutate the caller's instance). The engine never fits the caller's instance
+      directly, but only estimators honoring this contract get order- and schedule-independent
+      folds — :func:`numeraire.testing.check_fold_isolation` probes the property.
+    """
+    try:
+        isolated = copy.deepcopy(estimator)
+    except Exception as exc:
+        raise TypeError(
+            f"{method}: estimator {type(estimator).__name__} is not deepcopy-able; the engine "
+            "deep-copies the estimator before every fit to isolate folds — an estimator holding "
+            "an un-copyable resource (a DB handle, an open socket) belongs behind a factory that "
+            "builds the resource at fit time"
+        ) from exc
+    return isolated.fit(view)
+
+
 def _resolve_workers(n_jobs: int) -> int:
     """Resolve an sklearn-style ``n_jobs`` to a positive worker count (``-1`` = all cores)."""
     if n_jobs == 0:
@@ -566,7 +602,12 @@ def backtest_forecast(
     mean regardless. Include ``refit_every`` in ``config`` for provenance if you sweep it.
 
     ``n_jobs`` fans the independent refit blocks over a thread pool (``-1`` = all cores);
-    results are order-preserved, so the output is identical to ``n_jobs=1``.
+    results are order-preserved, so the output is identical to ``n_jobs=1``. Each refit block fits
+    an isolated ``copy.deepcopy`` of ``estimator`` — never the caller's instance — so blocks stay
+    order- and schedule-independent. The estimator must be deepcopy-able and must not route
+    fit-relevant mutable state around the copy (class attributes, module globals, containers a
+    custom ``__deepcopy__`` aliases); an un-copyable resource belongs behind a factory built at
+    ``fit`` time.
     """
     h = view.horizon if horizon is None else horizon
     chash = config_hash(config)
@@ -585,7 +626,7 @@ def backtest_forecast(
         return train.tail(window) if window is not None else train
 
     def _run_block(block: list[int]) -> list[tuple[pd.Timestamp, Float, Float, Float]]:
-        model = estimator.fit(_train_at(block[0]))
+        model = _fit_isolated(estimator, _train_at(block[0]), method)
         if capabilities.TO_FORECAST not in model.capabilities() or not isinstance(
             model, SupportsForecast
         ):
@@ -599,8 +640,23 @@ def backtest_forecast(
             # whose index is permuted relative to ``view.assets`` would otherwise be scored
             # positionally against the wrong asset's realized return. Index labels are str-normed
             # first (the shape contract str-maps the forecast index) so a str-match still aligns.
+            #
+            # The forecast *origins* (dates) are engine-assigned from the view calendar, so — unlike
+            # the weights / panel / pricing drivers, where the model returns a date-indexed output
+            # and could inject out-of-fold or duplicate dates — the containment the model can
+            # violate here is on the asset axis. Validate it before the reindex: duplicate labels
+            # would make ``reindex`` raise cryptically, and a label absent from the view was
+            # silently dropped
+            # (a phantom-asset forecast scored as if the model had abstained). Both are caller bugs.
             fc = model.forecast(train)
-            f = fc.set_axis([str(i) for i in fc.index]).reindex(assets)
+            normalized = [str(i) for i in fc.index]
+            forecast_labels = pd.Index(normalized)
+            if not forecast_labels.is_unique:
+                raise ValueError(f"{method}: forecast asset labels must be unique")
+            extra = sorted(set(normalized) - set(assets))
+            if extra:
+                raise ValueError(f"{method}: forecast carries assets absent from the view: {extra}")
+            f = fc.set_axis(normalized).reindex(assets)
             bench = train.returns_frame().to_numpy(dtype=np.float64).mean(axis=0)
             rows.append(
                 (origin, f.to_numpy(dtype=np.float64), bench, view.target_asof(origin, horizon=h))
@@ -679,7 +735,12 @@ def backtest_weights(
         Preprocessing/method config, hashed into every result row's ``config_hash``.
     n_jobs:
         Fan the independent ``(train, test)`` folds over a thread pool (``-1`` = all cores).
-        Order-preserving, so the result is identical to the serial ``n_jobs=1`` default.
+        Order-preserving, so the result is identical to the serial ``n_jobs=1`` default. Each fold
+        fits an isolated ``copy.deepcopy`` of ``estimator`` — never the caller's instance — so
+        folds stay order- and schedule-independent. The estimator must be deepcopy-able and must
+        not route fit-relevant mutable state around the copy (class attributes, module globals,
+        containers a custom ``__deepcopy__`` aliases); an un-copyable resource belongs behind a
+        factory built at ``fit`` time.
     missing_returns:
         Policy for a non-finite realized return on a non-zero target weight: fail closed
         (``"error"``), explicitly score it as zero (``"zero"``), or rescale the observed positive
@@ -694,7 +755,7 @@ def backtest_weights(
         fold: tuple[TimeSeriesView, TimeSeriesView],
     ) -> tuple[pd.DataFrame, pd.DataFrame] | None:
         train, test = fold
-        model = estimator.fit(train)
+        model = _fit_isolated(estimator, train, method)
         if capabilities.TO_WEIGHTS not in model.capabilities() or not isinstance(
             model, SupportsWeights
         ):
@@ -882,6 +943,9 @@ def backtest_panel(
     held return follows ``missing_returns`` (default ``"error"``). ``"renormalize_legs"`` rescales
     the observed positive and negative legs separately, preserving target gross/net exposure.
     ``n_jobs`` fans folds over a thread pool (``-1`` = all cores); output order is deterministic.
+    Each fold fits an isolated ``copy.deepcopy`` of ``estimator`` — never the caller's instance —
+    so folds stay order- and schedule-independent; the estimator must be deepcopy-able and must not
+    share fit-relevant mutable state across copies (see :func:`backtest_weights`).
     """
     policy = _validate_missing_return_policy(missing_returns)
     chash = config_hash(_weights_config(config, policy))
@@ -889,7 +953,7 @@ def backtest_panel(
 
     def _run(fold: tuple[CrossSectionView, CrossSectionView]) -> tuple[pd.Series, pd.Series] | None:
         train, test = fold
-        model = estimator.fit(train)
+        model = _fit_isolated(estimator, train, method)
         if capabilities.TO_WEIGHTS not in model.capabilities() or not isinstance(
             model, SupportsWeights
         ):
@@ -1003,6 +1067,44 @@ def _finalize_pricing(
     return predicted.iloc[keep], realized.iloc[keep]
 
 
+def _validate_pricing_labels(
+    pred: pd.DataFrame, calendar: pd.Index, assets: Sequence[str], method: str, *, where: str
+) -> pd.DataFrame:
+    """Contain an expected-return panel to the fold and return it with str-normalized columns.
+
+    Mirrors the containment guard the weights / panel drivers apply to their model output: the model
+    chooses the ``(date x asset)`` index of :meth:`SupportsPricing.expected_returns`, so a stateful
+    or adversarial pricer could otherwise emit dates before its train window, dates repeated across
+    the panel, or a phantom asset absent from the view — all of which then flow into pooling and
+    scoring as genuine OOS observations. Validation runs **before** :func:`_finalize_pricing` drops
+    the structural horizon tail, so a bad label hidden exclusively in that tail cannot slip through,
+    and before any emptiness short-circuit, so a zero-row panel cannot smuggle a phantom column.
+
+    The returned frame carries the **str-normalized** column labels, so per-fold panels concatenate
+    on one label set: validating ``str(c)`` but pooling the original labels would let one fold's
+    integer column and another fold's string column of the same name each pass individually yet
+    concatenate into two distinct assets. An empty panel (the documented "prices nothing"
+    convention, a plain empty index) skips the date checks — a zero-row index carries no dates to
+    contain — but never the column checks.
+    """
+    normalized_columns = [str(c) for c in pred.columns]
+    if not pd.Index(normalized_columns).is_unique:
+        raise ValueError(f"{method}: expected-return asset labels must be unique")
+    extra = sorted(set(normalized_columns) - set(assets))
+    if extra:
+        raise ValueError(f"{method}: expected returns carry assets absent from the view: {extra}")
+    if len(pred.index) > 0:
+        if not isinstance(pred.index, pd.DatetimeIndex):
+            raise TypeError(f"{method}: expected-return dates need a DatetimeIndex")
+        if not pred.index.is_unique:
+            raise ValueError(f"{method}: expected-return dates must be unique")
+        outside = ~pred.index.isin(calendar)
+        if bool(outside.any()):
+            dates = [str(t) for t in pred.index[outside][:5]]
+            raise ValueError(f"{method}: expected-return dates are outside {where}: {dates}")
+    return pred.set_axis(normalized_columns, axis=1)
+
+
 def backtest_pricing(
     estimator: Estimator,
     view: Any,
@@ -1023,19 +1125,32 @@ def backtest_pricing(
     pooled into one ``(date x asset)`` panel pair tagged ``protocol="walk_forward"``. Works on
     a :class:`~numeraire.core.data.TimeSeriesView` (SDF-style N-asset block) or a
     :class:`~numeraire.core.data.CrossSectionView` (characteristic panel). ``n_jobs`` fans the folds
-    over a thread pool (``-1`` = all cores); order-preserving, so identical output.
+    over a thread pool (``-1`` = all cores); order-preserving, so identical output. Each fold fits
+    an isolated ``copy.deepcopy`` of ``estimator`` — never the caller's instance — so folds stay
+    order- and schedule-independent; the estimator must be deepcopy-able and must not share
+    fit-relevant mutable state across copies (see :func:`backtest_weights`).
     """
     chash = config_hash(config)
     rid = run_id if run_id is not None else f"{method}-{chash}"
 
     def _run(fold: tuple[Any, Any]) -> tuple[pd.DataFrame, pd.DataFrame] | None:
         train, test = fold
-        model = estimator.fit(train)
+        model = _fit_isolated(estimator, train, method)
         if capabilities.TO_PRICING not in model.capabilities() or not isinstance(
             model, SupportsPricing
         ):
             raise TypeError(f"{method}: fitted model does not support 'to_pricing'")
-        pred = model.expected_returns(test)
+        # Validate the model-chosen (date x asset) labels before any emptiness short-circuit and
+        # before dropping the structural tail, so an out-of-fold / duplicate date or a phantom
+        # asset cannot be pooled as a real observation (or hide in a zero-row panel). The returned
+        # frame carries str-normalized columns, so per-fold panels concatenate on one label set.
+        pred = _validate_pricing_labels(
+            model.expected_returns(test),
+            test.calendar,
+            view.assets,
+            method,
+            where="the current test fold",
+        )
         if pred.empty:
             return None
         pred, realized = _finalize_pricing(pred, _pricing_realized(view, pred))
@@ -1081,12 +1196,15 @@ def backtest_pricing_in_sample(
     """
     chash = config_hash(config)
     rid = run_id if run_id is not None else f"{method}-{chash}"
-    model = estimator.fit(view)
+    model = _fit_isolated(estimator, view, method)
     if capabilities.TO_PRICING not in model.capabilities() or not isinstance(
         model, SupportsPricing
     ):
         raise TypeError(f"{method}: fitted model does not support 'to_pricing'")
-    pred = model.expected_returns(view)
+    # Validated before the emptiness branch, so a zero-row panel cannot smuggle a phantom column.
+    pred = _validate_pricing_labels(
+        model.expected_returns(view), view.calendar, view.assets, method, where="the view calendar"
+    )
     if pred.empty:
         predicted, realized_df = pred, pred.copy()
     else:
@@ -1201,7 +1319,10 @@ def backtest(
     before the per-fold fits, a silent look-ahead channel; mirroring the first fold keeps the probe
     within the same information set the driver's first fit uses. A user splitter's ``split(view)``
     is called exactly once (its folds are replayed to the driver), so a one-shot ``split`` iterator
-    loses no folds. The extra fit is intentional and
+    loses no folds. The probe — like every per-fold fit the selected driver performs — runs on an
+    isolated ``copy.deepcopy`` of the estimator, so the engine never fits the caller's instance
+    directly; the estimator must be deepcopy-able and must not share fit-relevant mutable state
+    across copies (see :func:`backtest_weights`). The extra fit is intentional and
     cheap relative to a full walk-forward; power users who want to skip it — or who need the precise
     return type — can call the typed driver (``backtest_weights`` / ``backtest_forecast`` /
     ``backtest_panel`` / ``backtest_pricing`` / ``backtest_pricing_in_sample``) directly.
@@ -1214,8 +1335,11 @@ def backtest(
     # Probe fit on the same data the selected driver's first fit would see (never the full sample
     # ahead of a walk-forward run), so a stateful estimator can't observe post-train data here.
     # A user splitter is materialized once and replayed to the driver (one-shot split() safe).
+    # The probe fits an isolated ``copy.deepcopy`` so reading capabilities never fits the caller's
+    # instance directly — otherwise a stateful probe fit would be a contamination channel into the
+    # walk-forward loop (subject to the same no-shared-mutable-state contract as the fold fits).
     probe, splitter = _probe_plan(view, splitter, in_sample, kwargs)
-    model = estimator.fit(probe)
+    model = _fit_isolated(estimator, probe, method)
     caps = set(model.capabilities()) & set(_DISPATCH_CAPS)
 
     if in_sample:

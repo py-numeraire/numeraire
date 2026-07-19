@@ -144,10 +144,20 @@ class _NoCapEst:
 
 
 class _RecordingWeightsEst:
-    """Records the max calendar date of every view it is fitted on (to inspect the probe fit)."""
+    """Records the max calendar date of every view it is fitted on (to inspect the probe fit).
+
+    The engine now fits an isolated ``copy.deepcopy`` per probe/fold, so the recording sink is
+    shared through ``__deepcopy__`` — otherwise every fit would land on a throwaway copy and the
+    original instance would observe nothing.
+    """
 
     def __init__(self) -> None:
         self.fit_max_dates: list[pd.Timestamp] = []
+
+    def __deepcopy__(self, memo: dict[int, object]) -> _RecordingWeightsEst:
+        clone = _RecordingWeightsEst()
+        clone.fit_max_dates = self.fit_max_dates  # shared sink survives per-fold isolation
+        return clone
 
     def fit(self, view: TimeSeriesView) -> _WeightsModel:
         self.fit_max_dates.append(view.calendar.max())
@@ -157,6 +167,11 @@ class _RecordingWeightsEst:
 class _RecordingForecastEst:
     def __init__(self) -> None:
         self.fit_max_dates: list[pd.Timestamp] = []
+
+    def __deepcopy__(self, memo: dict[int, object]) -> _RecordingForecastEst:
+        clone = _RecordingForecastEst()
+        clone.fit_max_dates = self.fit_max_dates  # shared sink survives per-fold isolation
+        return clone
 
     def fit(self, view: TimeSeriesView) -> _ForecastModel:
         self.fit_max_dates.append(view.calendar.max())

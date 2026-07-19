@@ -30,6 +30,10 @@ equivalent view each call — synthetic data with a fixed seed):
   on different data: fit a prefix, fit the full view (the contaminant), refit a freshly rebuilt
   content-equal prefix, and require the two prefix outputs to be bit-identical. A warm-start /
   cached-statistic leak fails here (including one keyed on view identity).
+- :func:`check_fold_isolation` — the engine fits an isolated ``deepcopy`` of the estimator per fold,
+  so the matching walk-forward driver produces bit-identical output under ``n_jobs=1`` and
+  ``n_jobs=4`` (and on a fresh serial rerun). Where ``check_fit_independence`` probes the
+  estimator's own fit purity, this probes the engine's fold isolation holds for a stateful one.
 - :func:`check_no_lookahead` — the property test **for ``to_weights`` and ``expected_returns``**.
   Both hand the model a multi-date view and require it to window internally, so its rows up to ``t``
   must be **invariant to mutating data strictly after ``t``**; a model that peeks past a prediction
@@ -51,7 +55,8 @@ engine-round-trip checks all apply to it exactly as they do to a weights method.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import copy
+from collections.abc import Callable, Iterator
 from typing import Any, cast
 
 import numpy as np
@@ -79,6 +84,7 @@ __all__ = [
     "check_engine_roundtrip",
     "check_estimator",
     "check_fit_independence",
+    "check_fold_isolation",
     "check_no_lookahead",
     "check_output_shapes",
 ]
@@ -97,6 +103,21 @@ _CORE_CAPS = frozenset({capabilities.TO_WEIGHTS, capabilities.TO_FORECAST, capab
 
 
 # --------------------------------------------------------------------------- internals
+
+
+class _ReplayFolds:
+    """Re-iterable splitter over folds materialized once from a caller-supplied splitter.
+
+    ``check_fold_isolation`` runs its driver three times; materializing the caller's folds once and
+    replaying them keeps a one-shot ``split`` iterator from silently emptying the later runs.
+    """
+
+    def __init__(self, folds: list[tuple[Any, Any]]) -> None:
+        self._folds = folds
+
+    def split(self, view: Any) -> Iterator[tuple[Any, Any]]:
+        _ = view
+        return iter(self._folds)
 
 
 def _fit(estimator: Any, view: Any) -> Any:
@@ -305,10 +326,26 @@ def check_output_shapes(estimator: Any, view_factory: ViewFactory) -> None:
     if capabilities.TO_PRICING in caps:
         p = _expected_returns(model, view)
         assert set(map(str, p.columns)) <= assets, "expected_returns columns must be ⊆ view.assets"
-        assert p.columns.is_unique, (
-            "expected_returns columns must be unique labels (duplicates break alignment)"
+        # Uniqueness must hold on the str-normalized labels the engine pools on: an int column and
+        # its str twin are distinct raw labels but collapse to one asset after normalization.
+        assert pd.Index([str(c) for c in p.columns]).is_unique, (
+            "expected_returns columns must be unique labels after str normalization "
+            "(an int label and its str twin would collide)"
         )
-        assert set(p.index) <= set(view.calendar), "expected_returns index must be ⊆ view.calendar"
+        # Mirror the driver's containment guard exactly (a violation the shape check accepted
+        # would only resurface later as an engine error): DatetimeIndex + unique dates, with the
+        # engine's zero-row "prices nothing" convention (a plain empty index) exempted.
+        if len(p.index) > 0:
+            assert isinstance(p.index, pd.DatetimeIndex), (
+                "expected_returns index must be a DatetimeIndex (an object index of timestamps "
+                "is rejected by the pricing drivers)"
+            )
+            assert p.index.is_unique, (
+                "expected_returns index must be unique dates (duplicates break realized alignment)"
+            )
+            assert set(p.index) <= set(view.calendar), (
+                "expected_returns index must be ⊆ view.calendar"
+            )
 
 
 def check_determinism(estimator: Any, view_factory: ViewFactory) -> None:
@@ -434,6 +471,117 @@ def check_no_lookahead(estimator: Any, view_factory: ViewFactory) -> None:
         )
 
 
+def check_fold_isolation(
+    estimator: Any,
+    view_factory: ViewFactory,
+    *,
+    splitter: Any | None = None,
+    min_train: int | None = None,
+    forecast_kwargs: dict[str, Any] | None = None,
+) -> None:
+    """Serial and parallel walk-forward runs are bit-identical (the engine isolates each fold).
+
+    Every driver fits an isolated ``copy.deepcopy`` of the estimator per fold, so a fold's result
+    cannot depend on which other folds ran first or on the ``n_jobs`` worker schedule — even for a
+    stateful estimator (a warm start seeded from the last fit, a cached statistic). This runs the
+    estimator's matching driver serially (``n_jobs=1``) and in parallel (``n_jobs=4``) and requires
+    the OOS panels to be bit-identical, plus a third fresh serial run identical to the first. The
+    capability probe itself fits a ``deepcopy``, so the supplied estimator reaches every run in its
+    pristine pre-fit state. An engine that shared one mutable estimator across parallel folds makes
+    the ``n_jobs=4`` run diverge here; per-fold isolation makes the property hold. A caller-supplied
+    splitter must yield **at least two folds** — with a single fold the parallel run never exercises
+    the thread pool and the check would certify nothing. Complements
+    :func:`check_fit_independence` — that probes the estimator's own fit purity; this probes that
+    the *engine* actually isolates each fold, so a stateful estimator stays reproducible regardless
+    of ``n_jobs``. (An estimator whose fit is nondeterministic also fails here; run
+    :func:`check_determinism` to tell the two causes apart.)
+    """
+    view = view_factory()
+    # Probe capabilities on a deepcopy: fitting the supplied instance here would advance any
+    # across-fit state before the measured runs, breaking the pristine-estimator premise.
+    caps = _caps(_fit(copy.deepcopy(estimator), view))
+    n = len(view.calendar)
+    warmup = min_train if min_train is not None else max(2, n // 2)
+
+    def _multifold() -> Any:
+        # Several folds so n_jobs=4 exercises real thread-level parallelism (a single fold never
+        # dispatches to the pool, hiding a scheduling-dependent divergence). A caller-supplied
+        # splitter is materialized once — so the requirement is checked and a one-shot ``split``
+        # iterator survives the three runs — and replayed through a re-iterable stand-in.
+        if splitter is not None:
+            folds = list(splitter.split(view))
+            if len(folds) < 2:
+                raise ValueError(
+                    f"check_fold_isolation needs a splitter yielding at least two folds (got "
+                    f"{len(folds)}): with a single fold the parallel run never exercises the "
+                    "thread pool, so serial-vs-parallel identity would be vacuous — supply a "
+                    "splitter producing two or more folds"
+                )
+            return _ReplayFolds(folds)
+        rest = max(1, n - warmup)
+        return WalkForwardSplitter(min_train=warmup, test_size=max(1, rest // 3), expanding=True)
+
+    def _compare(primary: Any, others: list[tuple[Any, str]], attrs: tuple[str, ...]) -> None:
+        for other, label in others:
+            for attr in attrs:
+                _assert_bit_identical(
+                    getattr(primary, attr),
+                    getattr(other, attr),
+                    f"walk-forward {attr} under {label} differs from the serial run — either a "
+                    "fold's result depends on execution order (fit-relevant mutable state shared "
+                    "across fold fits) or the estimator's fit is nondeterministic (an unseeded "
+                    "RNG fails here too; run check_determinism to distinguish)",
+                )
+
+    if capabilities.TO_WEIGHTS in caps and isinstance(view, TimeSeriesView):
+        sp = _multifold()
+        runs = [
+            backtest_weights(estimator, view, sp, method="conformance", n_jobs=j) for j in (1, 4, 1)
+        ]
+        _compare(
+            runs[0],
+            [(runs[1], "n_jobs=4"), (runs[2], "a fresh serial run")],
+            ("weights", "realized"),
+        )
+    elif capabilities.TO_WEIGHTS in caps and isinstance(view, CrossSectionView):
+        sp = _multifold()
+        runs = [
+            backtest_panel(estimator, view, sp, method="conformance", n_jobs=j) for j in (1, 4, 1)
+        ]
+        _compare(
+            runs[0],
+            [(runs[1], "n_jobs=4"), (runs[2], "a fresh serial run")],
+            ("weights", "realized"),
+        )
+    elif capabilities.TO_FORECAST in caps and isinstance(view, TimeSeriesView):
+        runs = [
+            backtest_forecast(
+                estimator,
+                view,
+                min_train=warmup,
+                method="conformance",
+                n_jobs=j,
+                **(forecast_kwargs or {}),
+            )
+            for j in (1, 4, 1)
+        ]
+        _compare(
+            runs[0],
+            [(runs[1], "n_jobs=4"), (runs[2], "a fresh serial run")],
+            ("forecasts", "realized", "benchmark"),
+        )
+    elif capabilities.TO_PRICING in caps and isinstance(view, TimeSeriesView | CrossSectionView):
+        sp = _multifold()
+        runs = [
+            backtest_pricing(estimator, view, sp, method="conformance", n_jobs=j) for j in (1, 4, 1)
+        ]
+        _compare(
+            runs[0],
+            [(runs[1], "n_jobs=4"), (runs[2], "a fresh serial run")],
+            ("predicted", "realized"),
+        )
+
+
 def check_engine_roundtrip(
     estimator: Any,
     view_factory: ViewFactory,
@@ -516,6 +664,15 @@ def check_estimator(
     # by comparing two fits of the same sub-view around a contaminating fit, so a prior check that
     # already fitted the estimator could prime that state and mask the leak.
     check_fit_independence(estimator, view_factory)
+    # Right after fit-independence: the engine must isolate every fold so serial ≡ parallel even for
+    # a stateful estimator. It runs the driver, so it follows the estimator-property checks above.
+    check_fold_isolation(
+        estimator,
+        view_factory,
+        splitter=splitter,
+        min_train=min_train,
+        forecast_kwargs=forecast_kwargs,
+    )
     check_capabilities(estimator, view_factory)
     check_output_shapes(estimator, view_factory)
     check_determinism(estimator, view_factory)

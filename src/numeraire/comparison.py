@@ -35,6 +35,7 @@ from numeraire.core.data import CrossSectionView, TimeSeriesView
 from numeraire.core.engine import (
     PricingOutput,
     _finalize_pricing,  # pyright: ignore[reportPrivateUsage]  # engine-internal, shared in-package
+    _fit_isolated,  # pyright: ignore[reportPrivateUsage]  # engine-internal, shared in-package
     _pricing_realized,  # pyright: ignore[reportPrivateUsage]  # engine-internal, shared in-package
     config_hash,
 )
@@ -104,8 +105,12 @@ def _price_entry(
     pricing drivers) or the pre-shifted ``(date x asset)`` frame built by :func:`compare` for a
     bare panel (the horizon-1 convention). Either way the alignment convention of
     :class:`~numeraire.core.engine.PricingOutput` is preserved — one class, one convention.
+
+    Like the engine drivers, the fit runs on an isolated ``copy.deepcopy`` of the entry's
+    estimator — never the caller's instance — under the same contract: the estimator must be
+    deepcopy-able and must not share fit-relevant mutable state across copies.
     """
-    model = entry.estimator.fit(entry.train_view)
+    model = _fit_isolated(entry.estimator, entry.train_view, entry.name)
     if capabilities.TO_PRICING not in model.capabilities() or not isinstance(
         model, SupportsPricing
     ):

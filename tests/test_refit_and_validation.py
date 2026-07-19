@@ -44,13 +44,27 @@ class _MeanModel:
 
 
 class _CountingEstimator:
-    """Historical-mean estimator that counts fits (to pin the refit cadence)."""
+    """Historical-mean estimator that counts fits (to pin the refit cadence).
+
+    The engine fits an isolated ``copy.deepcopy`` per refit block, so the counter is a shared
+    mutable sink threaded through ``__deepcopy__``; otherwise each block would increment a throwaway
+    copy and the original instance would report zero fits.
+    """
 
     def __init__(self) -> None:
-        self.n_fits = 0
+        self._fits = [0]  # one-element mutable sink, shared across per-block deepcopies
+
+    def __deepcopy__(self, memo: dict[int, object]) -> _CountingEstimator:
+        clone = _CountingEstimator()
+        clone._fits = self._fits
+        return clone
+
+    @property
+    def n_fits(self) -> int:
+        return self._fits[0]
 
     def fit(self, view: TimeSeriesView) -> _MeanModel:
-        self.n_fits += 1
+        self._fits[0] += 1
         r = view.returns_frame().to_numpy(dtype=np.float64)
         return _MeanModel(float(r.mean()), len(r))
 
