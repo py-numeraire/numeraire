@@ -137,7 +137,8 @@ def _price_entry(
             f"test_assets calendar ({list(stray_dates[:3])}...); test_view must share the calendar"
         )
     # The effective horizon: a concrete core view carries its own; the bare-frame path is the
-    # documented horizon-1 (next-row) convention. Frequency is inferred from the common calendar.
+    # documented horizon-1 (next-row) convention. Frequency is inferred from the entry's finalized
+    # prediction dates (the contract: the stamp follows the dates the output carries).
     horizon = 1 if isinstance(realized_source, pd.DataFrame) else int(realized_source.horizon)
     if isinstance(realized_source, pd.DataFrame):
         realized = realized_source.reindex(index=predicted.index, columns=predicted.columns)
@@ -154,7 +155,7 @@ def _price_entry(
         run_id=f"{entry.name}-{chash}",
         protocol="in_sample",
         horizon=horizon,
-        meta=_target_contract_meta(canonical.index, horizon),
+        meta=_target_contract_meta(predicted.index, horizon),
     )
 
 

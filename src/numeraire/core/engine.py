@@ -369,36 +369,39 @@ def config_hash(config: dict[str, Any] | None) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 
-def _infer_frequency(calendar: pd.Index) -> str | None:
-    """The pandas frequency code of a decision calendar, or ``None`` when not inferable.
+def _infer_frequency(dates: pd.Index) -> str | None:
+    """The pandas frequency code of a date index, or ``None`` when not inferable.
 
-    A wrapper over :func:`pandas.infer_freq` that never guesses: an irregular calendar (mixed gaps,
+    A wrapper over :func:`pandas.infer_freq` that never guesses: an irregular index (mixed gaps,
     fewer than three observations) yields ``None`` rather than a fabricated code. Drivers stamp the
     result into an output's ``meta['frequency']`` so an annualizing evaluator can derive the
     periods-per-year scaling from the data instead of a hard-coded default (and refuse when it is
-    ``None``). The comparison is on the calendar the decisions are made on, not the (possibly finer)
-    return frequency.
+    ``None``).
     """
-    if not isinstance(calendar, pd.DatetimeIndex) or len(calendar) < 3:
+    if not isinstance(dates, pd.DatetimeIndex) or len(dates) < 3:
         return None
     try:
-        return pd.infer_freq(calendar)
+        return pd.infer_freq(dates)
     except (ValueError, TypeError):
         return None
 
 
 def _target_contract_meta(
-    calendar: pd.Index, horizon: int, base: dict[str, Any] | None = None
+    dates: pd.Index, horizon: int, base: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Merge the effective target contract (frequency + overlap) into an output's ``meta``.
 
-    Always stamps ``frequency`` (the inferred decision-calendar code, or ``None``). When
-    ``horizon > 1`` the forward targets overlap by ``horizon - 1`` steps (a step-1 walk-forward over
-    an ``h``-period return reuses ``h - 1`` future periods across adjacent origins), so ``overlap``
-    is stamped as well — an annualizing/HAC-aware evaluator must treat such a series explicitly.
+    Always stamps ``frequency`` — inferred from ``dates``, which drivers pass as the **finalized
+    output prediction dates**, never the input view's calendar: a model that emits (say) quarterly
+    decisions from a monthly view must be annualized at the quarterly cadence its returns actually
+    realize, so the stamp follows the dates the output carries (``None`` when they are irregular /
+    not inferable). When ``horizon > 1`` the forward targets overlap by ``horizon - 1`` steps (a
+    step-1 walk-forward over an ``h``-period return reuses ``h - 1`` future periods across adjacent
+    origins), so ``overlap`` is stamped as well — an annualizing/HAC-aware evaluator must treat
+    such a series explicitly.
     """
     meta = dict(base or {})
-    meta["frequency"] = _infer_frequency(calendar)
+    meta["frequency"] = _infer_frequency(dates)
     if horizon > 1:
         meta["overlap"] = horizon - 1
     return meta
@@ -736,10 +739,11 @@ def backtest_forecast(
             f = fc.set_axis(normalized).reindex(assets)
             # The historical-mean benchmark must target the SAME h-period return the model predicts.
             # A step-1 mean of single-period returns understates an h>1 compounded target; under iid
-            # returns the h-period benchmark forecast is ``(1 + mu)^h - 1``. For h=1 this is exactly
-            # ``mu``, so single-period runs are unchanged.
+            # returns the h-period benchmark forecast is ``(1 + mu)^h - 1``. For h=1 the mean is
+            # used directly — ``(1+mu)^1 - 1`` is not float-associative, and the single-period
+            # benchmark must stay bit-identical to the historical convention.
             mu = train.returns_frame().to_numpy(dtype=np.float64).mean(axis=0)
-            bench = np.power(1.0 + mu, h) - 1.0
+            bench = mu if h == 1 else np.power(1.0 + mu, h) - 1.0
             rows.append(
                 (origin, f.to_numpy(dtype=np.float64), bench, view.target_asof(origin, horizon=h))
             )
@@ -766,7 +770,7 @@ def backtest_forecast(
         data_vintage=data_vintage,
         run_id=rid,
         horizon=h,
-        meta=_target_contract_meta(cal, h),
+        meta=_target_contract_meta(index, h),
     )
 
 
@@ -908,7 +912,7 @@ def backtest_weights(
         run_id=rid,
         missing_returns=policy,
         horizon=view.horizon,
-        meta=_target_contract_meta(view.calendar, view.horizon, _scoring_meta(policy, stats)),
+        meta=_target_contract_meta(weights.index, view.horizon, _scoring_meta(policy, stats)),
     )
 
 
@@ -1102,6 +1106,8 @@ def backtest_panel(
         realized_s = pd.Series(dtype=np.float64, index=empty_idx, name="realized")
 
     stats = _panel_scoring_stats(weights, realized_s, policy)
+    # The finalized output's decision dates (unique, in order) — the panel analog of a wide index.
+    panel_dates = pd.DatetimeIndex(weights.index.get_level_values("date").unique())
     return PanelWeightsOutput(
         weights=weights,
         realized=realized_s,
@@ -1111,7 +1117,7 @@ def backtest_panel(
         run_id=rid,
         missing_returns=policy,
         horizon=view.horizon,
-        meta=_target_contract_meta(view.calendar, view.horizon, _scoring_meta(policy, stats)),
+        meta=_target_contract_meta(panel_dates, view.horizon, _scoring_meta(policy, stats)),
     )
 
 
@@ -1270,7 +1276,7 @@ def backtest_pricing(
         run_id=rid,
         protocol="walk_forward",
         horizon=view.horizon,
-        meta=_target_contract_meta(view.calendar, view.horizon),
+        meta=_target_contract_meta(predicted.index, view.horizon),
     )
 
 
@@ -1314,7 +1320,7 @@ def backtest_pricing_in_sample(
         run_id=rid,
         protocol="in_sample",
         horizon=view.horizon,
-        meta=_target_contract_meta(view.calendar, view.horizon),
+        meta=_target_contract_meta(predicted.index, view.horizon),
     )
 
 

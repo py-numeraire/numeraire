@@ -22,6 +22,7 @@ from numeraire.core.engine import (
     PanelWeightsOutput,
     PricingOutput,
     WeightsOutput,
+    _infer_frequency,  # pyright: ignore[reportPrivateUsage]  # engine-internal, shared in-package
 )
 from numeraire.core.registry import register_evaluator
 from numeraire.core.schema import RESULT_COLUMNS
@@ -148,15 +149,16 @@ def _attrition(
 
 
 # Standard pandas frequency codes → periods per year, for deriving an annualization factor from an
-# output's inferred decision-calendar frequency. Anchor suffixes (``W-SUN``, ``QE-DEC``) are
-# dropped before lookup; pandas 2.2 renamed the period-end codes (``M``→``ME``, ``Q``→``QE``,
-# ``Y``/``A``→``YE``), so both spellings map. A frequency the map does not cover, an irregular
-# calendar, or a non-unit multiple (``2D``) is *not* guessed — an explicit ``periods_per_year`` is
-# then required.
+# output's frequency (stamped or inferred from its prediction dates). Anchor suffixes (``W-SUN``,
+# ``QE-DEC``) are dropped before lookup; pandas 2.2 renamed the period-end codes (``M``→``ME``,
+# ``Q``→``QE``, ``Y``/``A``→``YE``), so both spellings map. ``B``/``C`` (business/custom-business
+# daily) scale by the ~252 trading days per year; calendar-daily ``D`` covers all 365. A frequency
+# the map does not cover, an irregular calendar, or a non-unit multiple (``2D``) is *not* guessed —
+# an explicit ``periods_per_year`` is then required.
 _FREQ_PERIODS_PER_YEAR: dict[str, int] = {
     "B": 252,
     "C": 252,
-    "D": 252,
+    "D": 365,
     "W": 52,
     "M": 12,
     "ME": 12,
@@ -164,11 +166,14 @@ _FREQ_PERIODS_PER_YEAR: dict[str, int] = {
     "BM": 12,
     "BME": 12,
     "BMS": 12,
+    "CBME": 12,
+    "CBMS": 12,
     "Q": 4,
     "QE": 4,
     "QS": 4,
     "BQ": 4,
     "BQE": 4,
+    "BQS": 4,
     "A": 1,
     "Y": 1,
     "YE": 1,
@@ -177,6 +182,7 @@ _FREQ_PERIODS_PER_YEAR: dict[str, int] = {
     "BA": 1,
     "BY": 1,
     "BYE": 1,
+    "BYS": 1,
 }
 
 _FREQ_CODE_RE = re.compile(r"^(\d*)([A-Za-z]+)$")
@@ -199,25 +205,40 @@ def _periods_per_year_from_frequency(freq: str) -> int | None:
     return _FREQ_PERIODS_PER_YEAR.get(m.group(2).upper())
 
 
+def _output_dates(
+    out: WeightsOutput | PanelWeightsOutput | ForecastOutput | PricingOutput,
+) -> pd.Index:
+    """The output's finalized prediction dates (unique, in order, for every output shape)."""
+    if isinstance(out, WeightsOutput):
+        return out.weights.index
+    if isinstance(out, PanelWeightsOutput):
+        return pd.DatetimeIndex(out.weights.index.get_level_values("date").unique())
+    if isinstance(out, ForecastOutput):
+        return out.forecasts.index
+    return out.predicted.index
+
+
 def _resolve_periods_per_year(
     out: WeightsOutput | PanelWeightsOutput | ForecastOutput | PricingOutput,
     periods_per_year: int | None,
     evaluator: str,
 ) -> int:
-    """Resolve the annualization factor: an explicit argument always wins, else derive from meta.
+    """Resolve the annualization factor along the frequency chain; refuse rather than guess.
 
-    When ``periods_per_year`` is given it is used verbatim. Otherwise it is derived from the
-    output's ``meta['frequency']`` (stamped by the drivers from the decision calendar). Derivation
-    is *refused* — raising ``ValueError`` — when the targets overlap (``meta['overlap'] > 0``, a
-    multi-period horizon whose adjacent targets share future periods; annualizing an overlapping
-    series needs explicit treatment) or when no standard frequency is inferable (irregular calendar
-    / unknown code). This is the contract that stops daily, monthly, and overlapping outputs being
-    annualized with one silent default.
+    The chain: (1) an explicit ``periods_per_year`` argument always wins; (2) else the output's
+    stamped ``meta['frequency']`` (the drivers stamp it from the finalized prediction dates);
+    (3) else the frequency is inferred directly from the output's own prediction dates — so a
+    directly constructed output with a regular calendar needs no metadata at all; (4) else raise
+    ``ValueError`` demanding an explicit value. Derivation (2)-(3) is *refused* outright when the
+    targets overlap — ``out.horizon > 1`` (the canonical field), or an ``overlap`` stamp in
+    ``meta`` — because annualizing overlapping multi-period returns needs explicit treatment.
+    This is the contract that stops daily, monthly, and overlapping outputs being annualized with
+    one silent default.
     """
     if periods_per_year is not None:
         return periods_per_year
     meta = out.meta
-    overlap = meta.get("overlap")
+    overlap = out.horizon - 1 if out.horizon > 1 else meta.get("overlap")
     if overlap:
         raise ValueError(
             f"{evaluator}: the output has overlapping targets (overlap={overlap}); annualizing "
@@ -226,14 +247,18 @@ def _resolve_periods_per_year(
         )
     freq = meta.get("frequency")
     if freq is None:
+        # Fallback: infer from the output's own finalized prediction dates (a directly built
+        # output with a regular calendar then evaluates without any stamped metadata).
+        freq = _infer_frequency(_output_dates(out))
+    if freq is None:
         raise ValueError(
             f"{evaluator}: cannot derive periods_per_year — the output carries no inferable "
-            "decision-calendar frequency (irregular calendar); pass periods_per_year explicitly"
+            "prediction-date frequency (irregular calendar); pass periods_per_year explicitly"
         )
     ppy = _periods_per_year_from_frequency(str(freq))
     if ppy is None:
         raise ValueError(
-            f"{evaluator}: cannot derive periods_per_year from decision-calendar frequency "
+            f"{evaluator}: cannot derive periods_per_year from prediction-date frequency "
             f"{freq!r}; pass periods_per_year explicitly"
         )
     return ppy

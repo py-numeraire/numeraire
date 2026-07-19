@@ -39,10 +39,18 @@ class _HistoricalMeanModel:
         return {capabilities.TO_FORECAST}
 
     def forecast(self, view: DataView) -> pd.Series:
-        rets = _as_tsv(view).returns_frame()
+        tsv = _as_tsv(view)
+        rets = tsv.returns_frame()
         if self._window is not None:
             rets = rets.tail(self._window)
-        return rets.mean()  # per-asset prevailing mean; index = view.assets
+        # Per-asset prevailing mean, computed exactly as the engine's benchmark column so the two
+        # stay bit-identical (OOS R^2 vs the benchmark is exactly zero by construction). For a
+        # multi-period view the target is the compounded (t, t+h] return, so the mean is compounded
+        # to the same horizon ((1 + mu)^h - 1); h = 1 returns the mean itself, untouched.
+        mu = rets.to_numpy(dtype=float).mean(axis=0)
+        h = tsv.horizon
+        values = mu if h == 1 else (1.0 + mu) ** h - 1.0
+        return pd.Series(values, index=[str(c) for c in rets.columns])
 
 
 class HistoricalMean:

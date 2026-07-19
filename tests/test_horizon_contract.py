@@ -133,6 +133,27 @@ def test_output_dataclasses_reject_non_positive_horizon() -> None:
         )
 
 
+@pytest.mark.parametrize("bad", [1.5, float("nan"), float("inf"), 2.0, True])
+def test_horizon_must_be_a_plain_integer(bad: object) -> None:
+    # A malformed horizon (fractional, non-finite, boolean) is a type error everywhere — it must
+    # not sit inside a directly constructed output indefinitely.
+    idx = pd.date_range("2000-01-31", periods=6, freq="ME")
+    df = pd.DataFrame({"mkt": np.zeros(6)}, index=idx)
+    with pytest.raises(TypeError, match="finite integer"):
+        TimeSeriesView(df, df, horizon=bad)  # type: ignore[arg-type]
+    w = pd.DataFrame({"r0": np.ones(3)}, index=idx[:3])
+    with pytest.raises(TypeError, match="finite integer"):
+        WeightsOutput(
+            weights=w,
+            realized=w * 0.0,
+            method="m",
+            config_hash="c",
+            data_vintage="v",
+            run_id="r",
+            horizon=bad,  # type: ignore[arg-type]
+        )
+
+
 # ==========================================================================================
 # 2. outputs carry the effective target contract (all four drivers)
 # ==========================================================================================
@@ -172,6 +193,48 @@ def test_forecast_driver_stamps_contract() -> None:
     out = backtest_forecast(HistoricalMean(), view, min_train=24, method="hm")
     assert out.horizon == 1
     assert out.meta["frequency"] == "ME"
+
+
+class _QuarterlyEqualWeightModel:
+    """Emits equal weights only at quarter-end months of the test fold (a sparser cadence)."""
+
+    def capabilities(self) -> set[str]:
+        return {capabilities.TO_WEIGHTS}
+
+    def to_weights(self, view: TimeSeriesView) -> pd.DataFrame:
+        cal = view.calendar
+        qdates = cal[cal.month.isin([3, 6, 9, 12])]
+        n = len(view.assets)
+        return pd.DataFrame(np.full((len(qdates), n), 1.0 / n), index=qdates, columns=view.assets)
+
+
+class _QuarterlyEqualWeight:
+    def fit(self, view: TimeSeriesView) -> _QuarterlyEqualWeightModel:
+        return _QuarterlyEqualWeightModel()
+
+
+def test_sparse_quarterly_output_from_monthly_view_gets_quarterly_scaling() -> None:
+    # The stamp follows the FINALIZED OUTPUT dates, not the input view calendar: a model emitting
+    # quarterly decisions from a monthly view must be annualized at 4 periods/year, not 12.
+    view = make_monthly_view(n=60, n_assets=3, seed=6)
+    n = len(view.calendar)
+    sp = WalkForwardSplitter(min_train=12, test_size=n - 12, expanding=True)
+    out = backtest_weights(_QuarterlyEqualWeight(), view, sp, method="qew")
+    assert str(out.meta["frequency"]).startswith("QE")  # quarterly, from the output dates
+    via_stamp = SharpeEvaluator().evaluate(out).iloc[0]["value"]
+    explicit = SharpeEvaluator(periods_per_year=4).evaluate(out).iloc[0]["value"]
+    np.testing.assert_array_equal(via_stamp, explicit)
+    # and via the inference FALLBACK: the same panels rebuilt directly with no meta derive 4 too
+    direct = WeightsOutput(
+        weights=out.weights,
+        realized=out.realized,
+        method="qew",
+        config_hash="c",
+        data_vintage="v",
+        run_id="r",
+    )
+    via_fallback = SharpeEvaluator().evaluate(direct).iloc[0]["value"]
+    np.testing.assert_array_equal(via_fallback, explicit)
 
 
 def test_pricing_drivers_stamp_contract() -> None:
@@ -231,34 +294,58 @@ def test_derived_monthly_matches_explicit_twelve() -> None:
     np.testing.assert_array_equal(derived, explicit)  # bit-identical: derivation == old default
 
 
-def test_daily_frequency_derives_252() -> None:
-    idx = pd.date_range("2000-01-03", periods=20, freq="B")
-    out = WeightsOutput(
-        weights=pd.DataFrame({"s": np.ones(20)}, index=idx),
-        realized=pd.DataFrame({"s": np.full(20, 0.001)}, index=idx),
+def test_business_daily_derives_252_calendar_daily_365() -> None:
+    for freq, ppy in (("B", 252), ("D", 365)):
+        idx = pd.date_range("2000-01-03", periods=20, freq=freq)
+        out = WeightsOutput(
+            weights=pd.DataFrame({"s": np.ones(20)}, index=idx),
+            realized=pd.DataFrame({"s": np.full(20, 0.001)}, index=idx),
+            method="m",
+            config_hash="c",
+            data_vintage="v",
+            run_id="r",
+            meta={"frequency": freq},
+        )
+        derived = MeanReturnEvaluator().evaluate(out).iloc[0]["value"]
+        explicit = MeanReturnEvaluator(periods_per_year=ppy).evaluate(out).iloc[0]["value"]
+        np.testing.assert_array_equal(derived, explicit)
+
+
+def _irregular_weights_output(meta: dict[str, object]) -> WeightsOutput:
+    """A directly-built output on genuinely irregular dates (mixed gaps; nothing inferable)."""
+    idx = pd.DatetimeIndex(
+        ["2000-01-31", "2000-02-11", "2000-05-02", "2000-05-19", "2000-09-01", "2001-01-03"]
+    )
+    rng = np.random.default_rng(0)
+    return WeightsOutput(
+        weights=pd.DataFrame({"s": np.ones(len(idx))}, index=idx),
+        realized=pd.DataFrame({"s": rng.normal(0.01, 0.03, len(idx))}, index=idx),
         method="m",
         config_hash="c",
         data_vintage="v",
         run_id="r",
-        meta={"frequency": "B"},
+        meta=meta,
     )
-    derived = MeanReturnEvaluator().evaluate(out).iloc[0]["value"]
-    explicit = MeanReturnEvaluator(periods_per_year=252).evaluate(out).iloc[0]["value"]
+
+
+def test_irregular_dates_refuse_without_explicit() -> None:
+    # Stamped-None (a driver's irregular verdict) and no meta at all both end refused: the
+    # fallback inference runs on the same irregular dates and cannot produce a code either.
+    for meta in ({"frequency": None}, {}):
+        out = _irregular_weights_output(dict(meta))
+        with pytest.raises(ValueError, match="no inferable prediction-date frequency"):
+            SharpeEvaluator().evaluate(out)
+        # explicit argument always wins
+        assert np.isfinite(SharpeEvaluator(periods_per_year=12).evaluate(out).iloc[0]["value"])
+
+
+def test_direct_construction_regular_index_needs_no_meta() -> None:
+    # The inference fallback: a directly built output with a regular monthly index and NO stamped
+    # metadata derives 12 from its own prediction dates — exactly as if `meta={"frequency": "ME"}`.
+    out = _monthly_weights_output({})
+    derived = SharpeEvaluator().evaluate(out).iloc[0]["value"]
+    explicit = SharpeEvaluator(periods_per_year=12).evaluate(out).iloc[0]["value"]
     np.testing.assert_array_equal(derived, explicit)
-
-
-def test_irregular_frequency_refuses_without_explicit() -> None:
-    out = _monthly_weights_output({"frequency": None})  # driver stamps None for an irregular cal
-    with pytest.raises(ValueError, match="no inferable decision-calendar frequency"):
-        SharpeEvaluator().evaluate(out)
-    # explicit argument always wins
-    assert np.isfinite(SharpeEvaluator(periods_per_year=12).evaluate(out).iloc[0]["value"])
-
-
-def test_missing_frequency_meta_refuses() -> None:
-    out = _monthly_weights_output({})  # a directly-built output with no contract stamped
-    with pytest.raises(ValueError, match="no inferable decision-calendar frequency"):
-        SharpeEvaluator().evaluate(out)
 
 
 def test_overlap_refuses_without_explicit() -> None:
@@ -266,6 +353,26 @@ def test_overlap_refuses_without_explicit() -> None:
     with pytest.raises(ValueError, match="overlapping"):
         SharpeEvaluator().evaluate(out)
     # explicit periods_per_year overrides the refusal
+    assert np.isfinite(SharpeEvaluator(periods_per_year=12).evaluate(out).iloc[0]["value"])
+
+
+def test_direct_horizon2_refuses_even_with_frequency_meta() -> None:
+    # The refusal keys on the canonical `horizon` field: a direct construction that stamps a
+    # frequency but no `overlap` entry must still be refused when its horizon is > 1.
+    idx = pd.date_range("2000-01-31", periods=12, freq="ME")
+    rng = np.random.default_rng(1)
+    out = WeightsOutput(
+        weights=pd.DataFrame({"s": np.ones(12)}, index=idx),
+        realized=pd.DataFrame({"s": rng.normal(0.01, 0.03, 12)}, index=idx),
+        method="m",
+        config_hash="c",
+        data_vintage="v",
+        run_id="r",
+        horizon=2,
+        meta={"frequency": "ME"},
+    )
+    with pytest.raises(ValueError, match="overlapping"):
+        SharpeEvaluator().evaluate(out)
     assert np.isfinite(SharpeEvaluator(periods_per_year=12).evaluate(out).iloc[0]["value"])
 
 
@@ -283,12 +390,14 @@ def test_overlap_end_to_end_from_driver_refuses() -> None:
 # ==========================================================================================
 
 
-def test_h1_benchmark_is_single_period_mean() -> None:
+def test_h1_benchmark_is_single_period_mean_exactly() -> None:
+    # Bit-identical, not merely close: for h=1 the engine uses the mean itself, never a
+    # float-non-associative (1+mu)^1 - 1 detour.
     view = make_monthly_view(n=60, n_assets=1, seed=5)
     out = backtest_forecast(HistoricalMean(), view, min_train=24, method="hm")
     origin = out.benchmark.index[0]
-    mu = float(view.window(origin).returns_frame().to_numpy().mean())
-    np.testing.assert_allclose(out.benchmark.loc[origin, "r0"], mu)
+    mu = float(view.window(origin).returns_frame().to_numpy(dtype=np.float64).mean(axis=0)[0])
+    np.testing.assert_array_equal(float(out.benchmark.loc[origin, "r0"]), mu)
 
 
 def test_h2_benchmark_is_compounded_two_period_mean() -> None:
@@ -301,6 +410,19 @@ def test_h2_benchmark_is_compounded_two_period_mean() -> None:
     np.testing.assert_allclose(got, expected)
     # the oracle: the compounded benchmark is NOT the single-period mean it used to be
     assert not np.isclose(got, mu)
+
+
+def test_historical_mean_scores_exactly_zero_against_benchmark_at_h2() -> None:
+    # The baseline IS the benchmark, at every horizon: with the h-compounded HistoricalMean the
+    # forecast and the engine benchmark are bit-identical, so OOS R^2 is exactly 0.0 (before the
+    # fix the baseline stayed single-period and scored spuriously negative at h=2).
+    from numeraire.core.evaluators import OutOfSampleR2Evaluator
+
+    view = make_monthly_view(n=72, n_assets=1, seed=7, horizon=2)
+    out = backtest_forecast(HistoricalMean(), view, min_train=24, method="hm")
+    pd.testing.assert_frame_equal(out.forecasts, out.benchmark)
+    r2 = OutOfSampleR2Evaluator().evaluate(out).iloc[0]["value"]
+    assert r2 == 0.0
 
 
 def _forecast_output_direct() -> ForecastOutput:

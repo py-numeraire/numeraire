@@ -13,15 +13,19 @@ Versions are tag-driven (`hatch-vcs`).
 - Every engine output now carries the effective **target contract**. `WeightsOutput`,
   `PanelWeightsOutput`, `ForecastOutput`, and `PricingOutput` gain a `horizon: int` field (the
   forecast horizon `h` of the paired `(t, t+h]` targets, set by the producing driver; default `1`
-  for a direct construction), and the drivers stamp `frequency` (the decision calendar's
-  `pandas.infer_freq` code, `None` when not inferable — never guessed) into `meta`, plus
-  `overlap = horizon - 1` when `horizon > 1`. Reports no longer have to prove the horizon from the
-  input side, and annualization can scale by the real data frequency instead of a fixed default.
+  for a direct construction), and the drivers stamp `frequency` (the `pandas.infer_freq` code of
+  the **finalized output prediction dates** — not the input view's calendar, so a model emitting
+  sparser decisions than its view is scaled at the cadence its returns actually realize; `None`
+  when not inferable — never guessed) into `meta`, plus `overlap = horizon - 1` when
+  `horizon > 1`. Reports no longer have to prove the horizon from the input side, and
+  annualization can scale by the real data frequency instead of a fixed default.
 - The annualizing evaluators (`SharpeEvaluator`, `MeanReturnEvaluator`, `SortinoEvaluator`,
   `M2Evaluator`, `TreynorEvaluator`, `InformationRatioEvaluator`, `AlphaEvaluator`) accept
   `periods_per_year: int | None` (default `None`): when `None` they derive the periods-per-year
-  scaling from the output's `meta['frequency']` (B/D→252, W→52, M/ME/MS→12, Q→4, A/Y→1). An explicit
-  argument always wins.
+  scaling along a chain — the output's stamped `meta['frequency']`, else a frequency inferred from
+  the output's own prediction dates (so a directly constructed output with a regular calendar needs
+  no metadata) — mapped as B/C→252 (business/custom-business daily), D→365 (calendar daily), W→52,
+  M/ME/MS→12, Q→4, A/Y→1. An explicit argument always wins.
 - `MissingReturnPolicy` and `WeightsOutput.scoring_weights()` /
   `PanelWeightsOutput.scoring_weights()` make incomplete-return scoring explicit and auditable.
   `"renormalize_legs"` preserves the original positive and negative target exposures separately;
@@ -68,12 +72,13 @@ Versions are tag-driven (`hatch-vcs`).
 - **Breaking — annualizing evaluators refuse an irregular or overlapping output without an explicit
   `periods_per_year`.** With `periods_per_year=None` (the new default) `SharpeEvaluator`,
   `MeanReturnEvaluator`, `SortinoEvaluator`, `M2Evaluator`, `TreynorEvaluator`,
-  `InformationRatioEvaluator`, and `AlphaEvaluator` derive the scaling from the output's inferred
-  decision-calendar frequency; when the frequency is `None` (irregular calendar) or the targets
-  overlap (`meta['overlap'] > 0`, i.e. `horizon > 1`) they raise `ValueError` demanding an explicit
-  `periods_per_year` rather than annualizing daily, monthly, and overlapping series with one silent
-  default. Numbers are unchanged for the standard regular-frequency, horizon-1 case (a monthly
-  output still derives 12, a daily output 252).
+  `InformationRatioEvaluator`, and `AlphaEvaluator` derive the scaling from the output's stamped
+  frequency, else from its own prediction dates; when neither yields a standard code (irregular
+  dates) or the targets overlap (the canonical `horizon > 1` field, or an `overlap` stamp) they
+  raise `ValueError` demanding an explicit `periods_per_year` rather than annualizing daily,
+  monthly, and overlapping series with one silent default. Numbers are unchanged for the standard
+  regular-frequency, horizon-1 case (a monthly output still derives 12, a business-daily output
+  252; calendar-daily `D` derives 365).
 - **Breaking — a driver `horizon` that disagrees with `view.horizon` is an error.**
   `backtest_forecast`'s `horizon` argument may now only *assert* the view's horizon: passing a value
   different from `view.horizon` raises `ValueError` (the view is the single source of truth), instead
@@ -84,7 +89,8 @@ Versions are tag-driven (`hatch-vcs`).
   `horizon = 1` this is exactly the old value (`mu`), so single-period runs and their
   `OutOfSampleR2Evaluator` numbers are unchanged; for `horizon > 1` the benchmark — and therefore the
   OOS R² of a multi-period forecast comparison — changes (it was previously mis-scaled against a
-  single-period reference).
+  single-period reference). The bundled `baselines.HistoricalMean` compounds the same way, so its
+  OOS R² against the engine benchmark is exactly zero at every horizon, as documented.
 - **Breaking — benchmark-comparison evaluators fail closed above 50% missingness.** When the joint
   finite mask (model ∩ target ∩ benchmark) drops more than half of the candidate observations,
   `OutOfSampleR2Evaluator`, `SquaredErrorDiffEvaluator`, `ClarkWestEvaluator`, and the cross-sectional

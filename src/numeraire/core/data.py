@@ -77,20 +77,26 @@ def _as_2d(frame: pd.DataFrame) -> Float:
     return np.ascontiguousarray(frame.to_numpy(dtype=np.float64))
 
 
-def _validate_horizon(horizon: int) -> int:
-    """Reject a non-positive forecast horizon (``h <= 0`` is a contemporaneous look-ahead).
+def _validate_horizon(horizon: object) -> int:
+    """Reject a non-integer or non-positive forecast horizon.
 
     A horizon of ``0`` pairs a feature at ``t`` with a return realized over ``(t, t]`` — the empty,
     contemporaneous window that leaks — and a negative horizon reaches backwards; both are refused
-    at every surface a caller can set ``h``: the view constructors and each per-call ``horizon``
-    override (``target_asof`` / ``aligned``). ``h = 0`` also silently produces zero targets, so it
-    is rejected rather than accepted as an empty run.
+    at every surface a caller can set ``h``: the view constructors, each per-call ``horizon``
+    override (``target_asof`` / ``aligned``), and the engine output dataclasses. ``h = 0`` also
+    silently produces zero targets, so it is rejected rather than accepted as an empty run. The
+    horizon counts calendar *steps*, so it must be a plain integer — a fractional, non-finite, or
+    boolean value is malformed and raises ``TypeError`` before the ``>= 1`` check (a bad horizon
+    must not sit in a directly constructed output indefinitely).
     """
-    if horizon < 1:
-        raise ValueError(
-            f"horizon must be >= 1 (h=0 is a contemporaneous look-ahead); got {horizon}"
+    if isinstance(horizon, bool) or not isinstance(horizon, int | np.integer):
+        raise TypeError(
+            f"horizon must be a finite integer number of calendar steps; got {horizon!r}"
         )
-    return horizon
+    value = horizon if isinstance(horizon, int) else horizon.item()
+    if value < 1:
+        raise ValueError(f"horizon must be >= 1 (h=0 is a contemporaneous look-ahead); got {value}")
+    return value
 
 
 def _to_ns(values: pd.Series | pd.DatetimeIndex, *, context: str) -> NDArray[np.int64]:
