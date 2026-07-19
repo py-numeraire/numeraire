@@ -74,11 +74,15 @@ here; {func}`~numeraire.core.engine.backtest_forecast`,
 are its siblings.
 
 The return value is a {class}`~numeraire.core.engine.WeightsOutput` — a frozen container carrying
-the realised `weights` and `realized` panels plus the provenance every result row needs:
+the target `weights` and aligned `realized` panels plus the provenance every result row needs.
+Held missing returns fail closed by default; pass `missing_returns="zero"` or
+`"renormalize_legs"` to the driver only when that convention is intentional. The policy is part of
+the configuration hash.
 
 ```python
-result.config_hash    # '44136fa355b3' — a stable hash of the (empty) config dict
-result.run_id         # 'equal_weight-44136fa355b3'
+result.config_hash    # 'ea6e87584e83' — empty method config + missing_returns='error'
+result.run_id         # 'equal_weight-ea6e87584e83'
+result.scoring_weights()   # ex-post scoring weights (target weights stay untouched)
 result.strategy_returns()   # the realised, no-look-ahead P&L series
 ```
 
@@ -96,7 +100,7 @@ print(rows.to_string(index=False))
 
 ```text
                    run_id       method metric    value universe capability     protocol  config_hash data_vintage
-equal_weight-44136fa355b3 equal_weight sharpe 1.213409      n=5 to_weights walk_forward 44136fa355b3 synthetic-v1
+equal_weight-ea6e87584e83 equal_weight sharpe 1.213409      n=5 to_weights walk_forward ea6e87584e83 synthetic-v1
 ```
 
 ### Reading the result rows

@@ -23,7 +23,7 @@ import warnings
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, ParamSpec, TypeVar, cast
+from typing import Any, Literal, ParamSpec, TypeVar, cast
 
 import numpy as np
 import pandas as pd
@@ -41,6 +41,301 @@ _T = TypeVar("_T")
 _R = TypeVar("_R")
 _P = ParamSpec("_P")
 _RT = TypeVar("_RT")
+
+MissingReturnPolicy = Literal["error", "zero", "renormalize_legs"]
+_MISSING_RETURN_POLICIES: tuple[MissingReturnPolicy, ...] = (
+    "error",
+    "zero",
+    "renormalize_legs",
+)
+
+
+@dataclass(frozen=True)
+class _ScoringStats:
+    """Audit counts produced while applying a missing-return scoring policy."""
+
+    missing_held: int
+    missing_dates: int
+    renormalized_dates: int
+
+
+def _validate_missing_return_policy(policy: str) -> MissingReturnPolicy:
+    """Validate and narrow a public missing-return policy string."""
+    if policy not in _MISSING_RETURN_POLICIES:
+        raise ValueError(
+            f"missing_returns must be one of {_MISSING_RETURN_POLICIES}; got {policy!r}"
+        )
+    return policy
+
+
+def _weights_config(config: dict[str, Any] | None, policy: MissingReturnPolicy) -> dict[str, Any]:
+    """Add the engine scoring convention to the configuration provenance."""
+    merged = dict(config or {})
+    if "missing_returns" in merged and merged["missing_returns"] != policy:
+        raise ValueError(
+            "config['missing_returns'] conflicts with the explicit missing_returns argument; "
+            "pass the scoring convention only through missing_returns"
+        )
+    merged["missing_returns"] = policy
+    return merged
+
+
+def _scoring_array(
+    weights: Float,
+    realized: Float,
+    groups: np.ndarray,
+    group_labels: Sequence[object],
+    asset_labels: np.ndarray,
+    policy: MissingReturnPolicy,
+) -> tuple[Float, _ScoringStats]:
+    """Apply one scoring policy to flattened weights/returns grouped by decision date.
+
+    Target weights are never mutated. For ``renormalize_legs``, observed positive and negative
+    weights are separately rescaled back to their original per-date leg exposures. This preserves
+    both gross and net target exposure while making the effective, ex-post scoring weights
+    inspectable.
+    """
+    if weights.shape != realized.shape or weights.ndim != 1:
+        raise ValueError("weights and realized returns must be aligned one-dimensional arrays")
+    if len(groups) != len(weights) or len(asset_labels) != len(weights):
+        raise ValueError("scoring labels must align exactly with weights")
+    bad_weight = ~np.isfinite(weights)
+    if bool(bad_weight.any()):
+        i = int(np.flatnonzero(bad_weight)[0])
+        date = group_labels[int(groups[i])]
+        raise ValueError(
+            f"non-finite target weight for asset {asset_labels[i]!r} at {date}; "
+            "weights must be finite"
+        )
+
+    held = weights != 0.0
+    observed = np.isfinite(realized)
+    missing = held & ~observed
+    missing_groups = np.unique(groups[missing])
+    stats = _ScoringStats(
+        missing_held=int(missing.sum()),
+        missing_dates=len(missing_groups),
+        renormalized_dates=len(missing_groups) if policy == "renormalize_legs" else 0,
+    )
+    if not bool(missing.any()):
+        return weights.copy(), stats
+
+    if policy == "error":
+        i = int(np.flatnonzero(missing)[0])
+        date = group_labels[int(groups[i])]
+        same_date = missing & (groups == groups[i])
+        names = [str(a) for a in asset_labels[same_date]]
+        raise ValueError(
+            f"non-finite return for held asset(s) {names} at {date}; "
+            "handle delisting returns upstream or explicitly select "
+            "missing_returns='zero'/'renormalize_legs'"
+        )
+
+    effective = weights.copy()
+    if policy == "zero":
+        return effective, stats
+
+    effective[missing] = 0.0
+    n_groups = len(group_labels)
+    positive = weights > 0.0
+    negative = weights < 0.0
+    for leg_name, leg in (("positive", positive), ("negative", negative)):
+        magnitudes = np.where(leg, np.abs(weights), 0.0)
+        original = np.bincount(groups, weights=magnitudes, minlength=n_groups)
+        observed_magnitudes = np.where(leg & observed, np.abs(weights), 0.0)
+        available = np.bincount(groups, weights=observed_magnitudes, minlength=n_groups)
+        unidentified = (original > 0.0) & (available == 0.0)
+        if bool(unidentified.any()):
+            group = int(np.flatnonzero(unidentified)[0])
+            names = [str(a) for a in asset_labels[(groups == group) & leg & ~observed]]
+            raise ValueError(
+                f"all returns in the {leg_name} leg are non-finite at {group_labels[group]} "
+                f"for held asset(s) {names}; portfolio return is unidentified"
+            )
+        scale = np.ones(n_groups, dtype=np.float64)
+        scalable = available > 0.0
+        scale[scalable] = original[scalable] / available[scalable]
+        use = leg & observed
+        effective[use] *= scale[groups[use]]
+    return effective, stats
+
+
+def _wide_scoring(
+    weights: pd.DataFrame,
+    realized: pd.DataFrame,
+    policy: MissingReturnPolicy,
+) -> tuple[pd.DataFrame, _ScoringStats]:
+    """Return effective scoring weights and audit counts for a wide output."""
+    if not weights.index.equals(realized.index) or not weights.columns.equals(realized.columns):
+        raise ValueError("weights and realized must have identical indexes and columns")
+    if not weights.index.is_unique or not weights.columns.is_unique:
+        raise ValueError("weights axes must be unique")
+    n_dates, n_assets = weights.shape
+    flat_weights = weights.to_numpy(dtype=np.float64).reshape(-1)
+    flat_realized = realized.to_numpy(dtype=np.float64).reshape(-1)
+    groups = np.repeat(np.arange(n_dates, dtype=np.int64), n_assets)
+    assets = np.tile(weights.columns.to_numpy(dtype=object), n_dates)
+    effective, stats = _scoring_array(
+        flat_weights,
+        flat_realized,
+        groups,
+        list(weights.index),
+        assets,
+        policy,
+    )
+    frame = pd.DataFrame(
+        effective.reshape(weights.shape), index=weights.index, columns=weights.columns
+    )
+    return frame, stats
+
+
+def _add_scoring_stats(left: _ScoringStats, right: _ScoringStats) -> _ScoringStats:
+    """Add per-date scoring counts without retaining an effective-weight artifact."""
+    return _ScoringStats(
+        missing_held=left.missing_held + right.missing_held,
+        missing_dates=left.missing_dates + right.missing_dates,
+        renormalized_dates=left.renormalized_dates + right.renormalized_dates,
+    )
+
+
+def _wide_scoring_stats(
+    weights: pd.DataFrame,
+    realized: pd.DataFrame,
+    policy: MissingReturnPolicy,
+) -> _ScoringStats:
+    """Validate a wide output and collect audit counts with one date in memory at a time.
+
+    Drivers only need validation and metadata, not the full effective-weight frame exposed by
+    :meth:`WeightsOutput.scoring_weights`. Applying the shared policy one row at a time preserves
+    identical fail-closed semantics (including an entirely missing long/short leg) without
+    allocating flattened group/asset arrays or a second full-size weights frame.
+    """
+    if not weights.index.equals(realized.index) or not weights.columns.equals(realized.columns):
+        raise ValueError("weights and realized must have identical indexes and columns")
+    if not weights.index.is_unique or not weights.columns.is_unique:
+        raise ValueError("weights axes must be unique")
+
+    stats = _ScoringStats(0, 0, 0)
+    assets = weights.columns.to_numpy(dtype=object)
+    for row, date in enumerate(weights.index):
+        row_weights = weights.iloc[row].to_numpy(dtype=np.float64, copy=False)
+        row_realized = realized.iloc[row].to_numpy(dtype=np.float64, copy=False)
+        _effective, current = _scoring_array(
+            row_weights,
+            row_realized,
+            np.zeros(len(row_weights), dtype=np.int64),
+            [date],
+            assets,
+            policy,
+        )
+        stats = _add_scoring_stats(stats, current)
+    return stats
+
+
+def _panel_scoring(
+    weights: pd.Series,
+    realized: pd.Series,
+    policy: MissingReturnPolicy,
+) -> tuple[pd.Series, _ScoringStats]:
+    """Return effective scoring weights and audit counts for a long panel output."""
+    if not weights.index.equals(realized.index):
+        raise ValueError("panel weights and realized must have identical indexes")
+    index = weights.index
+    if not isinstance(index, pd.MultiIndex) or list(index.names) != ["date", "asset"]:
+        raise TypeError("panel weights need a (date, asset) MultiIndex")
+    if not index.is_unique:
+        raise ValueError("panel weights need unique (date, asset) keys")
+    dates = index.get_level_values("date")
+    groups, labels = pd.factorize(dates, sort=False)
+    effective, stats = _scoring_array(
+        weights.to_numpy(dtype=np.float64),
+        realized.to_numpy(dtype=np.float64),
+        np.asarray(groups, dtype=np.int64),
+        list(labels),
+        index.get_level_values("asset").to_numpy(dtype=object),
+        policy,
+    )
+    return pd.Series(effective, index=index, name=weights.name), stats
+
+
+def _panel_scoring_stats(
+    weights: pd.Series,
+    realized: pd.Series,
+    policy: MissingReturnPolicy,
+) -> _ScoringStats:
+    """Validate a panel output and collect audit counts one cross-section at a time.
+
+    The normal driver output is sorted by ``(date, asset)``, so each group is a contiguous slice.
+    A stable-order fallback keeps the helper correct for an otherwise valid non-contiguous input.
+    Only one cross-section's temporary effective weights and masks are live at once.
+    """
+    if not weights.index.equals(realized.index):
+        raise ValueError("panel weights and realized must have identical indexes")
+    index = weights.index
+    if not isinstance(index, pd.MultiIndex) or list(index.names) != ["date", "asset"]:
+        raise TypeError("panel weights need a (date, asset) MultiIndex")
+    if not index.is_unique:
+        raise ValueError("panel weights need unique (date, asset) keys")
+    if len(index) == 0:
+        return _ScoringStats(0, 0, 0)
+
+    date_codes = np.asarray(index.codes[0])
+    asset_codes = np.asarray(index.codes[1])
+    if bool((date_codes < 0).any()) or bool((asset_codes < 0).any()):
+        raise ValueError("panel weight keys cannot contain missing date or asset labels")
+
+    # Locate group boundaries with a one-byte-per-row mask. Sorted driver outputs take the fast
+    # path; the fallback's integer order is allocated only for a manually interleaved date index.
+    boundaries = np.empty(len(index), dtype=bool)
+    boundaries[0] = True
+    boundaries[1:] = date_codes[1:] != date_codes[:-1]
+    starts = np.flatnonzero(boundaries)
+    contiguous = len(np.unique(date_codes[starts])) == len(starts)
+    order: np.ndarray | None = None
+    grouped_codes = date_codes
+    if not contiguous:
+        order = np.argsort(date_codes, kind="stable")
+        grouped_codes = date_codes[order]
+        boundaries[0] = True
+        boundaries[1:] = grouped_codes[1:] != grouped_codes[:-1]
+        starts = np.flatnonzero(boundaries)
+    ends = np.r_[starts[1:], len(index)]
+
+    values = weights.to_numpy(dtype=np.float64, copy=False)
+    outcomes = realized.to_numpy(dtype=np.float64, copy=False)
+    date_labels = index.levels[0]
+    asset_labels = index.levels[1]
+    stats = _ScoringStats(0, 0, 0)
+    for start, end in zip(starts, ends, strict=True):
+        positions: slice | np.ndarray
+        if order is None:
+            positions = slice(int(start), int(end))
+            code_position = int(start)
+        else:
+            positions = order[int(start) : int(end)]
+            code_position = int(order[int(start)])
+        current_assets = asset_labels.take(asset_codes[positions]).to_numpy(dtype=object)
+        current_weights = values[positions]
+        _effective, current = _scoring_array(
+            current_weights,
+            outcomes[positions],
+            np.zeros(len(current_weights), dtype=np.int64),
+            [date_labels[date_codes[code_position]]],
+            current_assets,
+            policy,
+        )
+        stats = _add_scoring_stats(stats, current)
+    return stats
+
+
+def _scoring_meta(policy: MissingReturnPolicy, stats: _ScoringStats) -> dict[str, Any]:
+    """Serialize scoring provenance into an output's metadata."""
+    return {
+        "missing_returns": policy,
+        "missing_held": stats.missing_held,
+        "missing_dates": stats.missing_dates,
+        "renormalized_dates": stats.renormalized_dates,
+    }
 
 
 def _deprecated_alias(replacement: Callable[_P, _RT], *, old: str, new: str) -> Callable[_P, _RT]:
@@ -125,11 +420,13 @@ def _map_folds(fn: Callable[[_T], _R], items: Sequence[_T], n_jobs: int) -> list
 
 @dataclass(frozen=True)
 class WeightsOutput:
-    """OOS output for a ``to_weights`` method: realized weights aligned with realized returns.
+    """OOS output for a ``to_weights`` method: target weights and aligned realized returns.
 
     ``weights`` and ``realized`` are both ``(date x asset)`` indexed by the prediction dates,
     where ``realized.loc[t]`` is the return over ``(t, t+h]`` (so ``strategy_returns`` is the
-    realized, no-look-ahead P&L of holding ``weights.loc[t]`` over that period).
+    realized, no-look-ahead P&L of holding ``weights.loc[t]`` over that period). ``weights`` always
+    remains the model's target decision. If held returns are unavailable, ``missing_returns``
+    controls scoring and :meth:`scoring_weights` exposes any ex-post effective weights separately.
     """
 
     weights: pd.DataFrame
@@ -140,6 +437,19 @@ class WeightsOutput:
     run_id: str
     capability: str = capabilities.TO_WEIGHTS
     meta: dict[str, Any] = field(default_factory=dict)
+    missing_returns: MissingReturnPolicy = "error"
+
+    def __post_init__(self) -> None:
+        """Reject malformed target-weight artifacts before any evaluator can consume them."""
+        _validate_missing_return_policy(self.missing_returns)
+        if not self.weights.index.equals(self.realized.index) or not self.weights.columns.equals(
+            self.realized.columns
+        ):
+            raise ValueError("weights and realized must have identical indexes and columns")
+        if not self.weights.index.is_unique or not self.weights.columns.is_unique:
+            raise ValueError("weights axes must be unique")
+        if not bool(np.isfinite(self.weights.to_numpy(dtype=np.float64)).all()):
+            raise ValueError("target weights must all be finite")
 
     @property
     def universe(self) -> str:
@@ -147,10 +457,26 @@ class WeightsOutput:
         cols = [str(c) for c in self.weights.columns]
         return cols[0] if len(cols) == 1 else f"n={len(cols)}"
 
+    def scoring_weights(self) -> pd.DataFrame:
+        """Effective ex-post weights used only to score returns under ``missing_returns``.
+
+        Exposure, turnover, and plots should continue to consume :attr:`weights`, which is the
+        untouched target decision. This method makes any missing-return adjustment auditable.
+        """
+        policy = _validate_missing_return_policy(self.missing_returns)
+        effective, _stats = _wide_scoring(self.weights, self.realized, policy)
+        return effective
+
     def strategy_returns(self) -> pd.Series:
-        """Realized portfolio return per date: ``sum_a weights[a] * realized[a]``."""
-        prod = self.weights.to_numpy(dtype=np.float64) * self.realized.to_numpy(dtype=np.float64)
-        return pd.Series(np.nansum(prod, axis=1), index=self.weights.index, name="strategy_return")
+        """Realized portfolio return per date under the explicit missing-return policy."""
+        effective = self.scoring_weights().to_numpy(dtype=np.float64)
+        realized = self.realized.to_numpy(dtype=np.float64)
+        safe_realized = np.where(np.isfinite(realized), realized, 0.0)
+        return pd.Series(
+            np.sum(effective * safe_realized, axis=1),
+            index=self.weights.index,
+            name="strategy_return",
+        )
 
 
 @dataclass(frozen=True)
@@ -311,6 +637,22 @@ def _stack(rows: list[Float], n_cols: int) -> Float:
     return np.vstack(rows)
 
 
+def _scoreable_origins(view: TimeSeriesView | CrossSectionView, origins: pd.Index) -> np.ndarray:
+    """Mask origins whose full horizon lies inside the original view calendar.
+
+    This is the only safe reason for the engine to remove a model decision before scoring. A
+    non-finite target at any earlier origin is data missingness, not an unrealized tail.
+    """
+    if not isinstance(origins, pd.DatetimeIndex):
+        raise TypeError("weight dates must use a DatetimeIndex drawn from the view calendar")
+    positions = view.calendar.get_indexer(origins)
+    absent = positions < 0
+    if bool(absent.any()):
+        dates = [str(t) for t in origins[absent][:5]]
+        raise ValueError(f"weight dates are absent from the view calendar: {dates}")
+    return np.asarray(positions + view.horizon < len(view.calendar), dtype=bool)
+
+
 def backtest_weights(
     estimator: Estimator,
     view: TimeSeriesView,
@@ -321,6 +663,7 @@ def backtest_weights(
     data_vintage: str = "unknown",
     run_id: str | None = None,
     n_jobs: int = 1,
+    missing_returns: MissingReturnPolicy = "error",
 ) -> WeightsOutput:
     """Run a walk-forward OOS backtest of a ``to_weights`` estimator over ``view``.
 
@@ -337,8 +680,13 @@ def backtest_weights(
     n_jobs:
         Fan the independent ``(train, test)`` folds over a thread pool (``-1`` = all cores).
         Order-preserving, so the result is identical to the serial ``n_jobs=1`` default.
+    missing_returns:
+        Policy for a non-finite realized return on a non-zero target weight: fail closed
+        (``"error"``), explicitly score it as zero (``"zero"``), or rescale the observed positive
+        and negative legs separately to preserve target exposure (``"renormalize_legs"``).
     """
-    chash = config_hash(config)
+    policy = _validate_missing_return_policy(missing_returns)
+    chash = config_hash(_weights_config(config, policy))
     rid = run_id if run_id is not None else f"{method}-{chash}"
     assets = view.assets
 
@@ -352,23 +700,44 @@ def backtest_weights(
         ):
             raise TypeError(f"{method}: fitted model does not support 'to_weights'")
         w = model.to_weights(test)
-        if w.empty:
-            return None
         # Reindex to the canonical ``view.assets`` order so the model's returned columns pair with
         # ``realized`` (built in ``view.assets`` order) BY LABEL, not by position. A model that
         # returns weight columns permuted or subset relative to ``view.assets`` would otherwise be
         # silently mis-scored downstream (``strategy_returns`` multiplies positionally by column).
-        # Assets the model omits become NaN and drop out of the ``nansum`` P&L consistently with the
-        # existing unrealized-tail handling. (The wide path expects a DataFrame; the panel path,
-        # which handles a long Series, is ``backtest_panel``.) Column labels are str-normed first so
-        # a model whose columns only str-match ``view.assets`` (the shape contract str-maps) aligns.
-        wide = cast("pd.DataFrame", w)
-        wide = wide.set_axis([str(c) for c in wide.columns], axis=1)
-        w = wide.reindex(columns=assets)
+        # Assets the model omits are zero-weighted. (The wide path expects a DataFrame; the panel
+        # path, which handles a long Series, is ``backtest_panel``.) Column labels are str-normed
+        # first so a model whose columns only str-match ``view.assets`` aligns.
+        if not isinstance(w, pd.DataFrame):
+            raise TypeError(f"{method}: time-series weights need a date x asset DataFrame")
+        wide = w
+        if not isinstance(wide.index, pd.DatetimeIndex):
+            raise TypeError(f"{method}: weight dates need a DatetimeIndex")
+        if not wide.index.is_unique:
+            raise ValueError(f"{method}: weight dates must be unique")
+        if not wide.columns.is_unique:
+            raise ValueError(f"{method}: weight asset labels must be unique")
+        outside_test = ~wide.index.isin(test.calendar)
+        if bool(outside_test.any()):
+            dates = [str(t) for t in wide.index[outside_test][:5]]
+            raise ValueError(f"{method}: weight dates are outside the current test fold: {dates}")
+        normalized_columns = [str(c) for c in wide.columns]
+        if not pd.Index(normalized_columns).is_unique:
+            raise ValueError(
+                f"{method}: weight asset labels must remain unique after str alignment"
+            )
+        extra = sorted(set(normalized_columns) - set(assets))
+        if extra:
+            raise ValueError(f"{method}: weights carry assets absent from the view: {extra}")
+        wide = wide.set_axis(normalized_columns, axis=1)
+        w = wide.reindex(columns=assets, fill_value=0.0)
+        if not bool(np.isfinite(w.to_numpy(dtype=np.float64)).all()):
+            raise ValueError(f"{method}: target weights must all be finite")
+        if len(w.index) == 0:
+            return None
         realized = np.vstack([view.target_asof(t) for t in w.index])
-        # Drop prediction dates whose target is not yet realized in-sample (the unrealized
-        # tail near the end of data) — they cannot be scored without look-ahead.
-        keep = ~np.isnan(realized).all(axis=1)
+        # Drop only the mechanically unrealized horizon tail. An earlier all-NaN row is ordinary
+        # data missingness and must flow into the explicit policy rather than shorten the sample.
+        keep = _scoreable_origins(view, w.index)
         if not bool(keep.any()):
             return None
         return w.iloc[keep], pd.DataFrame(realized[keep], index=w.index[keep], columns=assets)
@@ -384,6 +753,7 @@ def backtest_weights(
         weights = pd.DataFrame(columns=assets)
         realized_df = pd.DataFrame(columns=assets)
 
+    stats = _wide_scoring_stats(weights, realized_df, policy)
     return WeightsOutput(
         weights=weights,
         realized=realized_df,
@@ -391,6 +761,8 @@ def backtest_weights(
         config_hash=chash,
         data_vintage=data_vintage,
         run_id=rid,
+        missing_returns=policy,
+        meta=_scoring_meta(policy, stats),
     )
 
 
@@ -401,6 +773,8 @@ class PanelWeightsOutput:
     ``weights`` and ``realized`` are long ``pd.Series`` on a ``(date, asset)`` MultiIndex; the wide,
     fixed-universe :class:`WeightsOutput` can't represent an entering/exiting universe, so the panel
     path carries the long form. ``realized`` is each name's ``(t, t+h]`` return, aligned by key.
+    ``weights`` always remains the model's target decision; :meth:`scoring_weights` separately
+    exposes any ex-post adjustment selected through ``missing_returns``.
     """
 
     weights: pd.Series
@@ -411,6 +785,20 @@ class PanelWeightsOutput:
     run_id: str
     capability: str = capabilities.TO_WEIGHTS
     meta: dict[str, Any] = field(default_factory=dict)
+    missing_returns: MissingReturnPolicy = "error"
+
+    def __post_init__(self) -> None:
+        """Reject malformed target-weight artifacts before any evaluator can consume them."""
+        _validate_missing_return_policy(self.missing_returns)
+        if not self.weights.index.equals(self.realized.index):
+            raise ValueError("panel weights and realized must have identical indexes")
+        index = self.weights.index
+        if not isinstance(index, pd.MultiIndex) or list(index.names) != ["date", "asset"]:
+            raise TypeError("panel weights need a (date, asset) MultiIndex")
+        if not index.is_unique:
+            raise ValueError("panel weights need unique (date, asset) keys")
+        if not bool(np.isfinite(self.weights.to_numpy(dtype=np.float64)).all()):
+            raise ValueError("panel target weights must all be finite")
 
     @property
     def universe(self) -> str:
@@ -418,26 +806,50 @@ class PanelWeightsOutput:
         names = self.weights.index.get_level_values("asset").unique()
         return str(names[0]) if len(names) == 1 else f"n={len(names)}"
 
+    def scoring_weights(self) -> pd.Series:
+        """Effective ex-post weights used only to score returns under ``missing_returns``."""
+        policy = _validate_missing_return_policy(self.missing_returns)
+        effective, _stats = _panel_scoring(self.weights, self.realized, policy)
+        return effective
+
     def strategy_returns(self) -> pd.Series:
-        """Cross-sectional portfolio return per date: ``sum_a weights[t, a] * realized[t, a]``."""
-        prod = self.weights * self.realized
-        return prod.groupby(level="date").sum().rename("strategy_return")
+        """Cross-sectional portfolio return per date under the missing-return policy."""
+        effective = self.scoring_weights()
+        safe_realized = self.realized.where(np.isfinite(self.realized), 0.0)
+        prod = effective * safe_realized
+        return prod.groupby(level="date", sort=False).sum().rename("strategy_return")
 
 
 def _panel_realized(view: CrossSectionView, keys: pd.MultiIndex, horizon: int) -> pd.Series:
-    """Forward return over ``(t, t+h]`` for each ``(date, asset)`` key (``nan`` on delisting)."""
-    dates = keys.get_level_values("date")
+    """Forward return by valid formation key (``nan`` on a later gap/non-finite input)."""
+    dates = pd.DatetimeIndex(keys.get_level_values("date"))
     assets = keys.get_level_values("asset").to_numpy()
     out = np.full(len(keys), np.nan, dtype=np.float64)
-    for t in pd.DatetimeIndex(dates).unique():
+    groups, unique_dates = pd.factorize(dates, sort=False)
+    order = np.argsort(groups, kind="stable")
+    counts = np.bincount(groups, minlength=len(unique_dates))
+    ends = np.cumsum(counts)
+    start = 0
+    for group, t in enumerate(unique_dates):
+        pos = order[start : int(ends[group])]
+        start = int(ends[group])
         ids, y = view.target_asof(t, horizon=horizon)
-        pos = np.flatnonzero(dates == t)
-        cross = pd.Series(y, index=pd.Index(ids))
-        out[pos] = cross.reindex(assets[pos]).to_numpy(dtype=np.float64)
+        current = pd.Index([str(a) for a in ids])
+        if not current.is_unique:
+            raise ValueError(f"formation-universe asset labels collide after str alignment at {t}")
+        requested = pd.Index([str(a) for a in assets[pos]])
+        absent = ~requested.isin(current)
+        if bool(absent.any()):
+            names = [str(a) for a in requested[absent]]
+            raise ValueError(
+                f"panel weights carry asset(s) absent from the formation universe at {t}: {names}"
+            )
+        cross = pd.Series(y, index=current)
+        out[pos] = cross.reindex(requested).to_numpy(dtype=np.float64)
     return pd.Series(out, index=keys, name="realized")
 
 
-def _as_weight_series(w: pd.Series | pd.DataFrame) -> pd.Series:
+def _as_weight_series(w: object) -> pd.Series[Any]:
     """Normalize a panel model's weights to a long ``(date, asset)`` Series."""
     if isinstance(w, pd.DataFrame):
         if w.shape[1] != 1:
@@ -445,7 +857,9 @@ def _as_weight_series(w: pd.Series | pd.DataFrame) -> pd.Series:
                 "panel to_weights must return a long (date, asset) Series or 1-col frame"
             )
         return w.iloc[:, 0]
-    return w
+    if not isinstance(w, pd.Series):
+        raise TypeError("panel to_weights must return a pd.Series or one-column pd.DataFrame")
+    return cast("pd.Series[Any]", w)
 
 
 def backtest_panel(
@@ -458,17 +872,19 @@ def backtest_panel(
     data_vintage: str = "unknown",
     run_id: str | None = None,
     n_jobs: int = 1,
+    missing_returns: MissingReturnPolicy = "error",
 ) -> PanelWeightsOutput:
     """Walk-forward OOS backtest of a cross-sectional ``to_weights`` estimator over a ragged panel.
 
     Mirrors :func:`backtest_weights` but for :class:`~numeraire.core.data.CrossSectionView`: the
-    fitted model returns long ``(date, asset)`` weights, realized forward returns are aligned by key
-    (so an entering/exiting universe is handled), and any name whose horizon is unrealized in-view
-    (or that delists first) is dropped before scoring. The time-series engine is left untouched.
-    ``n_jobs`` fans the folds over a thread pool (``-1`` = all cores); order-preserving, so
-    identical output.
+    fitted model returns long ``(date, asset)`` target weights and realized forward returns are
+    aligned by key. Only the mechanically unrealized horizon tail is removed; an earlier missing
+    held return follows ``missing_returns`` (default ``"error"``). ``"renormalize_legs"`` rescales
+    the observed positive and negative legs separately, preserving target gross/net exposure.
+    ``n_jobs`` fans folds over a thread pool (``-1`` = all cores); output order is deterministic.
     """
-    chash = config_hash(config)
+    policy = _validate_missing_return_policy(missing_returns)
+    chash = config_hash(_weights_config(config, policy))
     rid = run_id if run_id is not None else f"{method}-{chash}"
 
     def _run(fold: tuple[CrossSectionView, CrossSectionView]) -> tuple[pd.Series, pd.Series] | None:
@@ -479,16 +895,42 @@ def backtest_panel(
         ):
             raise TypeError(f"{method}: fitted model does not support 'to_weights'")
         w = _as_weight_series(model.to_weights(test))
-        if w.empty:
-            return None
         keys = w.index
         if not isinstance(keys, pd.MultiIndex):
             raise TypeError(f"{method}: panel weights need a (date, asset) MultiIndex")
+        if list(keys.names) != ["date", "asset"]:
+            raise TypeError(f"{method}: panel weights need index names ['date', 'asset']")
+        if not keys.is_unique:
+            raise ValueError(f"{method}: panel weights need unique (date, asset) keys")
+        if not bool(np.isfinite(w.to_numpy(dtype=np.float64)).all()):
+            raise ValueError(f"{method}: panel target weights must all be finite")
+        dates = keys.get_level_values("date")
+        if not isinstance(dates, pd.DatetimeIndex):
+            raise TypeError(f"{method}: panel weight dates need a DatetimeIndex")
+        outside_test = ~dates.isin(test.calendar)
+        if bool(outside_test.any()):
+            bad_dates = [str(t) for t in dates[outside_test].unique()[:5]]
+            raise ValueError(
+                f"{method}: panel weight dates are outside the current test fold: {bad_dates}"
+            )
+        normalized = pd.MultiIndex.from_arrays(
+            [dates, [str(a) for a in keys.get_level_values("asset")]],
+            names=["date", "asset"],
+        )
+        if not normalized.is_unique:
+            raise ValueError(
+                f"{method}: panel weight keys must remain unique after str asset alignment"
+            )
+        if len(w.index) == 0:
+            return None
+        # Validate every emitted formation key before dropping the structural tail. Otherwise a
+        # model could hide a ghost/stale asset exclusively in that tail and still pass the driver.
         realized = _panel_realized(view, keys, view.horizon)
-        keep = realized.notna().to_numpy()
+        keep = _scoreable_origins(view, dates)
         if not bool(keep.any()):
             return None
-        return w[keep], realized[keep]
+        w = w[keep]
+        return w, realized[keep]
 
     results = _map_folds(_run, list(splitter.split(view)), n_jobs)
     w_parts: list[pd.Series] = [r[0] for r in results if r is not None]
@@ -502,6 +944,7 @@ def backtest_panel(
         weights = pd.Series(dtype=np.float64, index=empty_idx, name="weight")
         realized_s = pd.Series(dtype=np.float64, index=empty_idx, name="realized")
 
+    stats = _panel_scoring_stats(weights, realized_s, policy)
     return PanelWeightsOutput(
         weights=weights,
         realized=realized_s,
@@ -509,6 +952,8 @@ def backtest_panel(
         config_hash=chash,
         data_vintage=data_vintage,
         run_id=rid,
+        missing_returns=policy,
+        meta=_scoring_meta(policy, stats),
     )
 
 
@@ -763,8 +1208,8 @@ def backtest(
 
     A model advertising more than one of the three dispatchable capabilities is **ambiguous** and
     raises ``TypeError`` — call the specific typed driver in that case. Extra keyword arguments
-    (``min_train``, ``window``, ``refit_every``, ``config``, ``data_vintage``, ``run_id``,
-    ``n_jobs``, ...) are forwarded to the selected driver.
+    (``min_train``, ``window``, ``refit_every``, ``missing_returns``, ``config``, ``data_vintage``,
+    ``run_id``, ``n_jobs``, ...) are forwarded to the selected driver.
     """
     # Probe fit on the same data the selected driver's first fit would see (never the full sample
     # ahead of a walk-forward run), so a stateful estimator can't observe post-train data here.

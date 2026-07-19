@@ -71,7 +71,7 @@ def _frame(rows: list[dict[str, object]]) -> pd.DataFrame:
 def _dated_weights(
     out: WeightsOutput | PanelWeightsOutput,
 ) -> list[tuple[object, dict[str, float]]]:
-    """Per-date ``{asset: weight}`` maps in calendar order (non-finite weights coerced to zero).
+    """Per-date ``{asset: target weight}`` maps in calendar order.
 
     Normalizes both the wide :class:`WeightsOutput` (a ``date x asset`` frame) and the long
     :class:`PanelWeightsOutput` (a ``(date, asset)`` Series over a ragged universe) to the same
@@ -80,13 +80,17 @@ def _dated_weights(
     dated: list[tuple[object, dict[str, float]]] = []
     if isinstance(out, WeightsOutput):
         assets = [str(c) for c in out.weights.columns]
-        mat = np.nan_to_num(out.weights.to_numpy(dtype=np.float64))
+        mat = out.weights.to_numpy(dtype=np.float64)
+        if not bool(np.isfinite(mat).all()):
+            raise ValueError("target weights must all be finite")
         for i, t in enumerate(out.weights.index):
             dated.append((t, {a: float(v) for a, v in zip(assets, mat[i], strict=True)}))
         return dated
     for t, sub in out.weights.groupby(level="date"):
         names = [str(a) for a in sub.index.get_level_values("asset")]
-        vals = np.nan_to_num(sub.to_numpy(dtype=np.float64))
+        vals = sub.to_numpy(dtype=np.float64)
+        if not bool(np.isfinite(vals).all()):
+            raise ValueError("panel target weights must all be finite")
         dated.append((t, {a: float(v) for a, v in zip(names, vals, strict=True)}))
     return dated
 
@@ -223,7 +227,7 @@ class ExposureEvaluator:
       equal-weight book of ``N`` names, 1.0 for a single-name bet).
 
     Handles the wide :class:`WeightsOutput` and the long :class:`PanelWeightsOutput` (turnover is
-    aligned across an entering/exiting universe). Non-finite weights are treated as zero.
+    aligned across an entering/exiting universe). Outputs reject non-finite target weights.
     """
 
     requires: ClassVar[set[str]] = {capabilities.TO_WEIGHTS}

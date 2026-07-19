@@ -99,7 +99,11 @@ def test_walk_forward_panel_weights_invariant_to_future_corruption() -> None:
     pan = toy_panel_wide()
     sp = WalkForwardSplitter(min_train=24, test_size=6)
     base = backtest_panel(
-        _XS(), CrossSectionView(pan, chars=["size", "bm", "mom"]), sp, method="p"
+        _XS(),
+        CrossSectionView(pan, chars=["size", "bm", "mom"]),
+        sp,
+        method="p",
+        missing_returns="zero",
     ).weights
 
     cut = pd.Timestamp("1992-06-30")
@@ -109,7 +113,11 @@ def test_walk_forward_panel_weights_invariant_to_future_corruption() -> None:
     for col in ("size", "bm", "mom", "ret"):
         pan2.loc[fut, col] = rng.normal(0.0, 50.0, int(fut.sum()))
     corrupt = backtest_panel(
-        _XS(), CrossSectionView(pan2, chars=["size", "bm", "mom"]), sp, method="p"
+        _XS(),
+        CrossSectionView(pan2, chars=["size", "bm", "mom"]),
+        sp,
+        method="p",
+        missing_returns="zero",
     ).weights
 
     common = base.index[base.index.get_level_values("date") < cut]

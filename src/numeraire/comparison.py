@@ -168,7 +168,7 @@ def compare(
     (``target_asof``) supplies the realized panel. When it is a bare ``(date x asset)`` frame,
     **horizon 1 is assumed**: ``realized.loc[t]`` is the panel's next row (``panel.shift(-1)``) —
     pass a view with the right ``horizon`` for multi-period targets. Prediction dates whose realized
-    cross-section is entirely unrealized (the horizon tail) are dropped, as in the drivers.
+    cross-section is entirely unrealized (the mechanically identified horizon tail) are dropped.
 
     Parameters
     ----------

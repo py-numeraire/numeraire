@@ -149,7 +149,13 @@ class _EW:
 
 def test_panel_output_flows_through_bundled_evaluators() -> None:
     v = CrossSectionView(_random_ragged_panel(6, n_dates=20), chars=CHARS)
-    out = backtest_panel(_EW(), v, WalkForwardSplitter(min_train=8, test_size=4), method="ew_panel")
+    out = backtest_panel(
+        _EW(),
+        v,
+        WalkForwardSplitter(min_train=8, test_size=4),
+        method="ew_panel",
+        missing_returns="zero",
+    )
     assert isinstance(out, PanelWeightsOutput)
     assert out.universe.startswith("n=")
     sharpe = SharpeEvaluator().evaluate(out)

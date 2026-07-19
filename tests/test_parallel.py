@@ -146,7 +146,7 @@ def test_walk_forward_forecast_parallel_matches_serial() -> None:
 def test_walk_forward_panel_parallel_matches_serial() -> None:
     v = CrossSectionView(toy_panel_wide(), chars=["size", "bm", "mom"], horizon=1)
     sp = WalkForwardSplitter(min_train=24, test_size=6)
-    serial = backtest_panel(_XSEstimator(), v, sp, method="fm")
-    parallel = backtest_panel(_XSEstimator(), v, sp, method="fm", n_jobs=3)
+    serial = backtest_panel(_XSEstimator(), v, sp, method="fm", missing_returns="zero")
+    parallel = backtest_panel(_XSEstimator(), v, sp, method="fm", missing_returns="zero", n_jobs=3)
     pd.testing.assert_series_equal(serial.weights, parallel.weights)
     pd.testing.assert_series_equal(serial.realized, parallel.realized)
