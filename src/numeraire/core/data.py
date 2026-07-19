@@ -109,23 +109,48 @@ def _to_ns(values: pd.Series | pd.DatetimeIndex, *, context: str) -> NDArray[np.
     return np.asarray(arr).astype(np.int64)
 
 
-def _to_excess(returns: pd.DataFrame, risk_free: pd.Series, method: str) -> pd.DataFrame:
-    """Convert raw per-asset returns to excess returns by subtracting the risk-free rate.
+_RETURN_TYPES: tuple[str, ...] = ("simple", "log")
 
-    ``risk_free`` is one ``(date,)`` series broadcast across every asset column. ``method``:
-    ``"simple"`` → ``r - rf``; ``"log"`` → ``log(1+r) - log(1+rf)``. The rf must cover every
-    return date (reindexed to the returns index; a missing rf date is an error, not a silent NaN).
+
+def _validate_return_type(return_type: str) -> str:
+    """Validate the declared input-return convention (``"simple"`` or ``"log"``)."""
+    if return_type not in _RETURN_TYPES:
+        raise ValueError(f"return_type must be one of {_RETURN_TYPES}; got {return_type!r}")
+    return return_type
+
+
+def _return_provenance(return_type: str) -> dict[str, str]:
+    """Provenance stamp recording an ingestion return-convention conversion (empty when simple).
+
+    A ``"log"`` declaration is converted to simple returns once at the door (see the view
+    constructors), so this records ``{"return_input": "log", "converted": "simple"}`` — a
+    hash-visible marker distinguishing a log-declared ingestion from a simple one of the same array.
     """
-    if method not in ("simple", "log"):
-        raise ValueError(f"excess method must be 'simple' or 'log'; got {method!r}")
+    return {"return_input": "log", "converted": "simple"} if return_type == "log" else {}
+
+
+def _log_to_simple(returns: pd.DataFrame) -> pd.DataFrame:
+    """Convert a declared log-return frame to simple returns once at ingestion (``expm1``)."""
+    return pd.DataFrame(
+        np.expm1(returns.to_numpy(dtype=np.float64)),
+        index=returns.index,
+        columns=returns.columns,
+    )
+
+
+def _to_excess(returns: pd.DataFrame, risk_free: pd.Series) -> pd.DataFrame:
+    """Convert raw per-asset simple returns to excess simple returns (``r - rf``).
+
+    ``risk_free`` is one ``(date,)`` series broadcast across every asset column. Both ``returns``
+    and ``risk_free`` are simple returns here — any declared ``"log"`` input has already been
+    converted to simple at ingestion, so excess is always the arithmetic difference (the framework
+    keeps one simple-return representation internally). The rf must cover every return date
+    (reindexed to the returns index; a missing rf date is an error, not a silent NaN).
+    """
     rf = risk_free.reindex(returns.index)
     if rf.isna().to_numpy().any():
         raise ValueError("risk_free is missing values for some return dates")
-    if method == "simple":
-        return returns.sub(rf, axis=0)
-    log_r = np.log1p(returns.to_numpy(dtype=np.float64))
-    log_rf = np.log1p(rf.to_numpy(dtype=np.float64))
-    return pd.DataFrame(log_r - log_rf[:, None], index=returns.index, columns=returns.columns)
+    return returns.sub(rf, axis=0)
 
 
 class FeatureBlock:
@@ -290,7 +315,9 @@ class TimeSeriesView:
         ``(date x asset)`` returns; its index is the decision/rebalance calendar. **Excess** by
         default; if ``risk_free`` is given they are treated as **raw** and converted to excess
         internally. A return indexed at ``t`` is realized over the period ending at ``t``. One
-        column = market timing.
+        column = market timing. **Simple returns by default** — pass ``return_type="log"`` to
+        declare log-return inputs, which are converted to simple returns once at ingestion (see
+        ``return_type`` below).
     features:
         Convenience single-block input: a ``(date x feature)`` frame sharing the returns index,
         wrapped as one ``lag=0`` :class:`FeatureBlock`. Mutually exclusive with ``blocks``.
@@ -304,8 +331,17 @@ class TimeSeriesView:
     horizon:
         Forecast horizon ``h`` in calendar steps; features at ``t`` pair with the return realized
         over ``(t, t+h]``. ``h >= 1``; ``h = 0`` (contemporaneous) is rejected.
-    risk_free, excess:
-        Optional raw→excess conversion (see :func:`_to_excess`).
+    risk_free:
+        Optional raw→excess conversion (see :func:`_to_excess`). When given, ``risk_free`` is
+        declared in the same convention as ``returns`` (``return_type``); a ``"log"`` rf is
+        converted to simple alongside the returns before the excess subtraction.
+    return_type:
+        Convention of the input ``returns`` (and ``risk_free``): ``"simple"`` (default) or
+        ``"log"``. **Log input is a declared input convention only** — declared log returns are
+        converted to simple returns once at ingestion via ``expm1`` and the conversion is stamped
+        into :attr:`provenance`. Everything downstream (targets, strategy P&L, evaluators) then
+        operates on a single simple-return representation, so cross-sectional portfolio arithmetic
+        (weighted sums) and multi-period compounding (``prod(1 + r) - 1``) are always correct.
 
     Notes
     -----
@@ -323,19 +359,30 @@ class TimeSeriesView:
         blocks: Sequence[Block] | None = None,
         horizon: int = 1,
         risk_free: pd.Series | None = None,
-        excess: str = "simple",
+        return_type: str = "simple",
     ) -> None:
         if horizon < 1:
             raise ValueError(
                 f"horizon must be >= 1 (h=0 is a contemporaneous look-ahead); got {horizon}"
             )
+        return_type = _validate_return_type(return_type)
         returns = cast("pd.DataFrame", to_pandas(returns, what="returns"))
         if features is not None:
             features = cast("pd.DataFrame", to_pandas(features, what="features"))
         if features is not None and blocks is not None:
             raise ValueError("provide at most one of `features` (shared-calendar) or `blocks`")
+        # Convert a declared log-return input to simple returns ONCE, at the door — returns and the
+        # (same-convention) risk-free rate together — so every downstream path stays simple-return.
+        if return_type == "log":
+            returns = _log_to_simple(returns)
+            if risk_free is not None:
+                risk_free = pd.Series(
+                    np.expm1(risk_free.to_numpy(dtype=np.float64)),
+                    index=risk_free.index,
+                    name=risk_free.name,
+                )
         if risk_free is not None:
-            returns = _to_excess(returns, risk_free, excess)
+            returns = _to_excess(returns, risk_free)
         index = returns.index
         if not isinstance(index, pd.DatetimeIndex):
             raise TypeError("view index must be a DatetimeIndex")
@@ -354,6 +401,9 @@ class TimeSeriesView:
         self._ret: Float = _as_2d(returns)
         self._blocks: list[Block] = list(blocks)
         self.horizon: int = horizon
+        # Records an ingestion return-convention conversion (log -> simple), hash-visible via
+        # `config_hash`; empty for a simple-declared input. Carried across PIT sub-views.
+        self._provenance: dict[str, str] = _return_provenance(return_type)
         # Calendar = the subset of dates at which predictions/rebalances happen. Defaults to
         # the full returns index; `window`/`between` carve out train/test sub-calendars.
         self._cal: pd.DatetimeIndex = index
@@ -370,6 +420,7 @@ class TimeSeriesView:
         view._ret = self._ret[:data_hi]
         view._blocks = [b.truncate(ts) for b in self._blocks]
         view.horizon = self.horizon
+        view._provenance = self._provenance
         view._cal = cal
         return view
 
@@ -385,6 +436,15 @@ class TimeSeriesView:
     def calendar(self) -> pd.DatetimeIndex:
         """Rebalancing / observation timestamps (the prediction calendar)."""
         return self._cal
+
+    @property
+    def provenance(self) -> dict[str, str]:
+        """Ingestion provenance (e.g. a log→simple return conversion); empty for simple inputs.
+
+        Merge into a backtest ``config`` (``config={**view.provenance, ...}``) to make the return
+        convention hash-visible in every result row's ``config_hash``.
+        """
+        return dict(self._provenance)
 
     def window(self, end: object) -> TimeSeriesView:
         """View restricted to information available up to ``end`` (data and calendar both <= end).
@@ -659,6 +719,12 @@ class CrossSectionView:
     Characteristics are taken as **known at their row date** (period-end
     info set at ``t``); any reporting/publication lag must be applied to the panel before it is
     handed in (PIT is the provider's contract, mirroring a time-series block's ``lag=0``).
+
+    The ``ret`` column is **simple returns by default**; pass ``return_type="log"`` to declare
+    log-return inputs, which are converted to simple returns once at ingestion (``expm1``) and
+    stamped into :attr:`provenance`. Every forward-return target then compounds on a single
+    simple-return representation (``prod(1 + r) - 1``), so the contract is: log is a declared input
+    convention only, and all outputs/targets are simple-return objects.
     """
 
     def __init__(
@@ -671,11 +737,13 @@ class CrossSectionView:
         asset_col: str = "asset",
         horizon: int = 1,
         char_blocks: Sequence[CharBlock] | None = None,
+        return_type: str = "simple",
     ) -> None:
         if horizon < 1:
             raise ValueError(
                 f"horizon must be >= 1 (h=0 is a contemporaneous look-ahead); got {horizon}"
             )
+        return_type = _validate_return_type(return_type)
         panel = cast("pd.DataFrame", to_pandas(panel, what="panel"))
         names = list(chars)
         required = [date_col, asset_col, ret, *names]
@@ -703,6 +771,11 @@ class CrossSectionView:
         self._asset: NDArray[np.object_] = frame[asset_col].to_numpy().astype(object)
         self._x: Float = _as_2d(frame[names])
         self._ret: Float = frame[ret].to_numpy(dtype=np.float64)
+        # A declared log-return column is converted to simple returns once, at ingestion, so the
+        # forward-return compounding (`prod(1 + r) - 1`) and every downstream path stay simple.
+        if return_type == "log":
+            self._ret = np.asarray(np.expm1(self._ret), dtype=np.float64)
+        self._provenance: dict[str, str] = _return_provenance(return_type)
         self._dpos: NDArray[np.int64] = np.asarray(
             cal.searchsorted(frame[date_col].to_numpy()), dtype=np.int64
         )
@@ -735,6 +808,15 @@ class CrossSectionView:
     def assets(self) -> list[str]:
         """Sorted union of every asset id appearing in this view (report / tensor column axis)."""
         return [str(self._labels[c]) for c in np.unique(self._codes)]
+
+    @property
+    def provenance(self) -> dict[str, str]:
+        """Ingestion provenance (e.g. a log→simple return conversion); empty for simple inputs.
+
+        Merge into a backtest ``config`` (``config={**view.provenance, ...}``) to make the return
+        convention hash-visible in every result row's ``config_hash``.
+        """
+        return dict(self._provenance)
 
     @property
     def char_names(self) -> list[str]:
@@ -825,6 +907,7 @@ class CrossSectionView:
         v._codes = self._codes[:row_hi]
         v._rowmat = self._rowmat[:hi]
         v.horizon = self.horizon
+        v._provenance = self._provenance
         v._cal = cal
         return v
 

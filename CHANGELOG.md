@@ -163,6 +163,18 @@ Versions are tag-driven (`hatch-vcs`).
   bins with no positive observed weight remain `NaN` instead of silently becoming equal-weighted.
   `SortResult.counts` now explicitly counts frozen formation members, including members whose
   realized return is missing.
+- **Breaking — declared log returns are converted to simple returns at ingestion.** Previously a
+  log-return input flowed unchanged into simple-return algebra: the forward target compounds with
+  `prod(1 + r) - 1` and strategy P&L is a weighted sum, so declared log returns were mis-aggregated
+  (for `ln(1.1)`/`ln(1.2)` the old target was ≈`0.29525` instead of the correct compounded
+  `0.32`). `TimeSeriesView` and `CrossSectionView` now take `return_type="simple"` (default) or
+  `"log"`; a `"log"` input (returns and, for `TimeSeriesView`, the same-convention `risk_free`) is
+  converted once via `expm1` at construction, and the conversion is recorded in `view.provenance`
+  (`{"return_input": "log", "converted": "simple"}`) so it is auditable and hash-visible. Everything
+  downstream stays on a single simple-return representation. This **replaces** the `excess="simple"
+  | "log"` parameter (the `excess="log"` path produced log excess returns that then hit simple
+  compounding — the same defect); excess-of-risk-free is now always the arithmetic `r - rf` in
+  simple space. Any run that declared log inputs now returns the correct (different) numbers.
 
 ## [0.2.2] - 2026-07-07
 

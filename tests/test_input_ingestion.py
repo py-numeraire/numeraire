@@ -60,22 +60,35 @@ def test_multi_asset_returns_ingest() -> None:
 # --- excess conversion ---------------------------------------------------------------------------
 
 
-def test_excess_method_must_be_valid() -> None:
+def test_return_type_must_be_valid() -> None:
     idx = _idx(3)
     df = pd.DataFrame({"r": [0.0, 0.0, 0.0]}, index=idx)
     rf = pd.Series([0.0, 0.0, 0.0], index=idx)
-    with pytest.raises(ValueError, match="must be 'simple' or 'log'"):
-        TimeSeriesView(df, df, risk_free=rf, excess="geometric")
+    with pytest.raises(ValueError, match="return_type must be one of"):
+        TimeSeriesView(df, df, risk_free=rf, return_type="geometric")
 
 
-def test_excess_log_values_are_exact() -> None:
+def test_log_returns_converted_to_simple_at_ingestion() -> None:
+    # A declared log-return input is converted once at the door (r = expm1(x)); with a
+    # same-convention log risk-free rate, excess is the simple arithmetic difference.
+    idx = _idx(2)
+    raw = pd.DataFrame({"r": [np.log1p(0.05), np.log1p(0.03)]}, index=idx)
+    feats = pd.DataFrame({"x": [1.0, 2.0]}, index=idx)
+    rf = pd.Series([np.log1p(0.01), np.log1p(0.02)], index=idx)
+    v = TimeSeriesView(raw, feats, risk_free=rf, return_type="log")
+    # returns and rf both expm1'd, then r - rf in simple space
+    expected = np.array([0.05 - 0.01, 0.03 - 0.02])
+    np.testing.assert_allclose(v.returns_frame()["r"].to_numpy(), expected)
+    assert v.provenance == {"return_input": "log", "converted": "simple"}
+
+
+def test_simple_return_type_leaves_returns_unchanged() -> None:
     idx = _idx(2)
     raw = pd.DataFrame({"r": [0.05, 0.03]}, index=idx)
     feats = pd.DataFrame({"x": [1.0, 2.0]}, index=idx)
-    rf = pd.Series([0.01, 0.02], index=idx)
-    v = TimeSeriesView(raw, feats, risk_free=rf, excess="log")
-    expected = np.log1p([0.05, 0.03]) - np.log1p([0.01, 0.02])
-    np.testing.assert_allclose(v.returns_frame()["r"].to_numpy(), expected)
+    v = TimeSeriesView(raw, feats, return_type="simple")
+    np.testing.assert_allclose(v.returns_frame()["r"].to_numpy(), [0.05, 0.03])
+    assert v.provenance == {}
 
 
 def test_risk_free_broadcasts_across_assets() -> None:
