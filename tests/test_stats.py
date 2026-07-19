@@ -191,6 +191,7 @@ def test_alpha_evaluator_emits_schema_rows() -> None:
         config_hash="cfg",
         data_vintage="synthetic",
         run_id="toy-cfg",
+        meta={"frequency": "ME"},  # monthly → AlphaEvaluator derives periods_per_year=12
     )
     rows = AlphaEvaluator(factors, nw_lags=3).evaluate(out)
     validate_result(rows)

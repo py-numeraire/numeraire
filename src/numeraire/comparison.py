@@ -37,6 +37,7 @@ from numeraire.core.engine import (
     _finalize_pricing,  # pyright: ignore[reportPrivateUsage]  # engine-internal, shared in-package
     _fit_isolated,  # pyright: ignore[reportPrivateUsage]  # engine-internal, shared in-package
     _pricing_realized,  # pyright: ignore[reportPrivateUsage]  # engine-internal, shared in-package
+    _target_contract_meta,  # pyright: ignore[reportPrivateUsage]  # engine-internal, in-package
     config_hash,
 )
 from numeraire.core.evaluators import AverageAbsAlphaEvaluator, CrossSectionalR2Evaluator
@@ -135,6 +136,10 @@ def _price_entry(
             f"comparison entry {entry.name!r}: expected_returns has dates absent from the common "
             f"test_assets calendar ({list(stray_dates[:3])}...); test_view must share the calendar"
         )
+    # The effective horizon: a concrete core view carries its own; the bare-frame path is the
+    # documented horizon-1 (next-row) convention. Frequency is inferred from the entry's finalized
+    # prediction dates (the contract: the stamp follows the dates the output carries).
+    horizon = 1 if isinstance(realized_source, pd.DataFrame) else int(realized_source.horizon)
     if isinstance(realized_source, pd.DataFrame):
         realized = realized_source.reindex(index=predicted.index, columns=predicted.columns)
     else:
@@ -149,6 +154,8 @@ def _price_entry(
         data_vintage=data_vintage,
         run_id=f"{entry.name}-{chash}",
         protocol="in_sample",
+        horizon=horizon,
+        meta=_target_contract_meta(predicted.index, horizon),
     )
 
 

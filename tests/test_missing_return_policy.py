@@ -531,6 +531,11 @@ def test_policy_is_hashed_and_recorded_in_metadata() -> None:
         "missing_held": 1,
         "missing_dates": 1,
         "renormalized_dates": 0,
+        # Target-contract metadata travels alongside the scoring stats. The stamp follows the
+        # output's own prediction dates; this fixture scores too few (< 3) to infer a code, and
+        # the honest stamp for that is None — annualizing two observations needs an explicit
+        # periods_per_year anyway.
+        "frequency": None,
     }
     assert renormalized.meta["renormalized_dates"] == 1
 

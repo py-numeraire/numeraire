@@ -608,7 +608,10 @@ def check_engine_roundtrip(
         assert not out.weights.empty, (
             "backtest_weights produced no weights (widen the fixture/splitter)"
         )
-        rows = SharpeEvaluator().evaluate(out)
+        # Fixed periods_per_year: this is a smoke check of the evaluate round-trip, and a
+        # conformance fixture may legitimately use an irregular calendar the frequency
+        # derivation would refuse; the scaling value itself is irrelevant here.
+        rows = SharpeEvaluator(periods_per_year=12).evaluate(out)
         validate_result(rows)
         assert len(rows) >= 1
     elif capabilities.TO_WEIGHTS in caps and isinstance(view, CrossSectionView):
@@ -619,7 +622,10 @@ def check_engine_roundtrip(
         assert not out.weights.empty, (
             "backtest_panel produced no weights (widen the fixture/splitter)"
         )
-        rows = SharpeEvaluator().evaluate(out)
+        # Fixed periods_per_year: this is a smoke check of the evaluate round-trip, and a
+        # conformance fixture may legitimately use an irregular calendar the frequency
+        # derivation would refuse; the scaling value itself is irrelevant here.
+        rows = SharpeEvaluator(periods_per_year=12).evaluate(out)
         validate_result(rows)
         assert len(rows) >= 1
     elif capabilities.TO_FORECAST in caps and isinstance(view, TimeSeriesView):

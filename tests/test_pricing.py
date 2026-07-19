@@ -350,6 +350,7 @@ def test_protocol_column_in_schema_and_existing_rows_walk_forward() -> None:
         config_hash="dead",
         data_vintage="2026",
         run_id="toy-dead",
+        meta={"frequency": "ME"},  # monthly → SharpeEvaluator derives periods_per_year=12
     )
     row = SharpeEvaluator().evaluate(w).iloc[0]
     assert row["protocol"] == "walk_forward"

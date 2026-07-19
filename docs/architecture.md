@@ -101,7 +101,17 @@ The single convention every driver and evaluator obeys: features known **as of**
 with the return **realised over** `(t, t+h]`. A feature dated `t` is never matched to a return that
 overlaps `t` itself. The view owns this pairing — `features_asof(t)` and `target_asof(t, h)` — so a
 method never indexes the returns array directly and a one-period contemporaneous overlap is
-structurally impossible rather than a bug waiting to happen.
+structurally impossible rather than a bug waiting to happen. The horizon `h` must be `>= 1`
+(`h = 0` is the contemporaneous look-ahead and is rejected at every surface), and the view is the
+single source of truth for it — a driver `horizon` argument may only assert `view.horizon`, never
+disagree with it.
+
+Every engine output records the effective target contract so downstream scoring never has to infer
+it: a `horizon` field, plus `frequency` (the decision calendar's inferred `pandas` frequency code,
+or `None` when the calendar is irregular) and — when `h > 1` — `overlap = h - 1` in its `meta`.
+Annualising evaluators (Sharpe, Sortino, …) use this to derive their periods-per-year scaling from
+the data; when the frequency is not inferable or the targets overlap they refuse to guess and
+require an explicit `periods_per_year`.
 
 ### Why point-in-time discipline matters
 
